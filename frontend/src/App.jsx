@@ -15,7 +15,7 @@ import { Track } from "livekit-client";
 import "@livekit/components-styles";
 import "./App.css";
 
-const BACKEND_URL = "http://localhost:5001";
+const BACKEND_URL = "https://aircanvas-meet.onrender.com";
 
 /* =========================================================
    CUSTOM MEETING ROOM
