@@ -78,6 +78,9 @@ function MeetingRoom({
     const [activePanel, setActivePanel] =
         useState(null);
 
+    const [shareCopied, setShareCopied] =
+        useState(false);
+
     const [micEnabled, setMicEnabled] =
         useState(true);
 
@@ -546,6 +549,74 @@ function MeetingRoom({
         };
 
     /* =====================================================
+       SHARE CURRENT MEETING
+    ===================================================== */
+
+    const handleShareMeeting =
+        async () => {
+            try {
+                /*
+                 * Always build the clean public meeting URL from
+                 * the current origin and room ID.
+                 *
+                 * The host token is intentionally excluded.
+                 */
+                const meetingLink =
+                    `${window.location.origin}/meeting/${roomId}`;
+
+                if (
+                    navigator.clipboard &&
+                    window.isSecureContext
+                ) {
+                    await navigator.clipboard.writeText(
+                        meetingLink
+                    );
+                } else {
+                    const textArea =
+                        document.createElement("textarea");
+
+                    textArea.value =
+                        meetingLink;
+
+                    textArea.style.position =
+                        "fixed";
+                    textArea.style.opacity =
+                        "0";
+
+                    document.body.appendChild(
+                        textArea
+                    );
+
+                    textArea.focus();
+                    textArea.select();
+
+                    document.execCommand(
+                        "copy"
+                    );
+
+                    document.body.removeChild(
+                        textArea
+                    );
+                }
+
+                setShareCopied(true);
+
+                setTimeout(() => {
+                    setShareCopied(false);
+                }, 2000);
+            } catch (error) {
+                console.error(
+                    "Share meeting error:",
+                    error
+                );
+
+                setError(
+                    "Unable to copy the meeting link. Please copy the URL from the browser."
+                );
+            }
+        };
+
+    /* =====================================================
        PANEL
     ===================================================== */
 
@@ -601,16 +672,20 @@ function MeetingRoom({
 
                     <button
                         className="header-action"
-                        onClick={() =>
-                            navigator.clipboard?.writeText(
-                                window.location.href
-                            )
+                        onClick={
+                            handleShareMeeting
                         }
-                        title="Copy meeting link"
+                        title={
+                            shareCopied
+                                ? "Meeting link copied"
+                                : "Copy current meeting link"
+                        }
                     >
                         🔗
                         <span>
-                            Share
+                            {shareCopied
+                                ? "Copied!"
+                                : "Share"}
                         </span>
                     </button>
 
