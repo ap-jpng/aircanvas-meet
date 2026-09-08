@@ -16,6 +16,11 @@ const LIVEKIT_URL = process.env.LIVEKIT_URL;
 const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY;
 const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET;
 
+// Production frontend URL
+const FRONTEND_URL =
+    process.env.FRONTEND_URL ||
+    "https://aircanvas-meet.vercel.app";
+
 app.use(
     cors({
         origin: "*",
@@ -25,13 +30,21 @@ app.use(
 
 app.use(express.json());
 
+// ============================================================
+// ROOT
+// ============================================================
+
 app.get("/", (req, res) => {
     res.json({
         status: "online",
         service: "AirCanvas Meet Backend",
-        version: "2.0.0",
+        version: "2.1.0",
     });
 });
+
+// ============================================================
+// HEALTH CHECK
+// ============================================================
 
 app.get("/api/health", (req, res) => {
     res.json({
@@ -42,15 +55,23 @@ app.get("/api/health", (req, res) => {
                 LIVEKIT_API_KEY &&
                 LIVEKIT_API_SECRET
         ),
+        frontendUrl: FRONTEND_URL,
     });
 });
 
-// ------------------------------------------------------------
+// ============================================================
 // CREATE MEETING
-// ------------------------------------------------------------
-// The creator receives a signed hostToken.
-// This token proves that this participant is the host
-// when they later join the room.
+// ============================================================
+// Creates a new room ID and a signed host token.
+//
+// IMPORTANT:
+// The meeting link is ALWAYS generated using FRONTEND_URL.
+// Therefore, even when the request comes from localhost,
+// the shareable link will be:
+//
+// https://aircanvas-meet.vercel.app/meeting/XXXXXXXX
+// ============================================================
+
 app.post("/api/meeting/create", (req, res) => {
     try {
         if (!LIVEKIT_API_SECRET) {
@@ -66,7 +87,9 @@ app.post("/api/meeting/create", (req, res) => {
             .toUpperCase();
 
         const hostToken = createHostToken(roomId);
-        const meetingLink = `${getFrontendUrl(req)}/meeting/${roomId}`;
+
+        const meetingLink =
+            `${FRONTEND_URL}/meeting/${roomId}`;
 
         res.json({
             success: true,
@@ -75,7 +98,10 @@ app.post("/api/meeting/create", (req, res) => {
             hostToken,
         });
     } catch (error) {
-        console.error("Create meeting error:", error);
+        console.error(
+            "Create meeting error:",
+            error
+        );
 
         res.status(500).json({
             success: false,
@@ -84,9 +110,10 @@ app.post("/api/meeting/create", (req, res) => {
     }
 });
 
-// ------------------------------------------------------------
+// ============================================================
 // GENERATE LIVEKIT TOKEN
-// ------------------------------------------------------------
+// ============================================================
+
 app.post("/api/meeting/token", async (req, res) => {
     try {
         const {
@@ -95,6 +122,10 @@ app.post("/api/meeting/token", async (req, res) => {
             hostToken,
         } = req.body;
 
+        // ----------------------------------------------------
+        // Validate room ID
+        // ----------------------------------------------------
+
         if (!roomId) {
             return res.status(400).json({
                 success: false,
@@ -102,12 +133,23 @@ app.post("/api/meeting/token", async (req, res) => {
             });
         }
 
-        if (!participantName || !participantName.trim()) {
+        // ----------------------------------------------------
+        // Validate participant name
+        // ----------------------------------------------------
+
+        if (
+            !participantName ||
+            !participantName.trim()
+        ) {
             return res.status(400).json({
                 success: false,
                 message: "participantName is required",
             });
         }
+
+        // ----------------------------------------------------
+        // Validate LiveKit configuration
+        // ----------------------------------------------------
 
         if (
             !LIVEKIT_URL ||
@@ -116,13 +158,19 @@ app.post("/api/meeting/token", async (req, res) => {
         ) {
             return res.status(500).json({
                 success: false,
-                message: "LiveKit credentials are not configured",
+                message:
+                    "LiveKit credentials are not configured",
             });
         }
 
-        // Only the signed token created by /meeting/create
-        // can grant host status.
-        const isHost = verifyHostToken(roomId, hostToken);
+        // ----------------------------------------------------
+        // Determine whether this participant is the host
+        // ----------------------------------------------------
+
+        const isHost = verifyHostToken(
+            roomId,
+            hostToken
+        );
 
         const identity = crypto.randomUUID();
 
@@ -130,77 +178,125 @@ app.post("/api/meeting/token", async (req, res) => {
             .trim()
             .slice(0, 80);
 
+        // ----------------------------------------------------
+        // Create LiveKit access token
+        // ----------------------------------------------------
+
         const token = new AccessToken(
             LIVEKIT_API_KEY,
             LIVEKIT_API_SECRET,
             {
                 identity,
                 name: cleanName,
+
                 metadata: JSON.stringify({
                     isHost,
                 }),
+
                 ttl: "2h",
             }
         );
 
+        // ----------------------------------------------------
+        // Room permissions
+        // ----------------------------------------------------
+
         token.addGrant({
             roomJoin: true,
             room: roomId,
+
             canPublish: true,
             canSubscribe: true,
             canPublishData: true,
         });
 
+        // ----------------------------------------------------
+        // Generate JWT
+        // ----------------------------------------------------
+
         const jwt = await token.toJwt();
+
+        // ----------------------------------------------------
+        // Return token + host status
+        // ----------------------------------------------------
 
         res.json({
             success: true,
+
             token: jwt,
+
             serverUrl: LIVEKIT_URL,
+
             roomId,
+
             participantName: cleanName,
+
             isHost,
         });
     } catch (error) {
-        console.error("Token generation error:", error);
+        console.error(
+            "Token generation error:",
+            error
+        );
 
         res.status(500).json({
             success: false,
-            message: "Failed to generate LiveKit token",
+            message:
+                "Failed to generate LiveKit token",
         });
     }
 });
 
-// ------------------------------------------------------------
-// HOST TOKEN HELPERS
-// ------------------------------------------------------------
+// ============================================================
+// CREATE SIGNED HOST TOKEN
+// ============================================================
 
 function createHostToken(roomId) {
     const signature = crypto
-        .createHmac("sha256", LIVEKIT_API_SECRET)
-        .update(`aircanvas-host:${roomId}`)
+        .createHmac(
+            "sha256",
+            LIVEKIT_API_SECRET
+        )
+        .update(
+            `aircanvas-host:${roomId}`
+        )
         .digest("base64url");
 
     return `${roomId}.${signature}`;
 }
 
-function verifyHostToken(roomId, hostToken) {
-    if (!hostToken || !LIVEKIT_API_SECRET) {
+// ============================================================
+// VERIFY HOST TOKEN
+// ============================================================
+
+function verifyHostToken(
+    roomId,
+    hostToken
+) {
+    if (
+        !hostToken ||
+        !LIVEKIT_API_SECRET
+    ) {
         return false;
     }
 
-    const expected = createHostToken(roomId);
+    const expected =
+        createHostToken(roomId);
 
-    const expectedBuffer = Buffer.from(
-        expected,
-        "utf8"
-    );
+    const expectedBuffer =
+        Buffer.from(
+            expected,
+            "utf8"
+        );
 
-    const receivedBuffer = Buffer.from(
-        hostToken,
-        "utf8"
-    );
+    const receivedBuffer =
+        Buffer.from(
+            hostToken,
+            "utf8"
+        );
 
+    // Prevent timingSafeEqual from throwing
+    // when lengths are different.
     if (
         expectedBuffer.length !==
         receivedBuffer.length
@@ -214,43 +310,57 @@ function verifyHostToken(roomId, hostToken) {
     );
 }
 
-// ------------------------------------------------------------
-// FRONTEND URL
-// ------------------------------------------------------------
-
-function getFrontendUrl(req) {
-    const origin = req.headers.origin;
-
-    if (origin) {
-        return origin;
-    }
-
-    // Used when testing the backend directly
-    // from PowerShell.
-    return "http://localhost:5173";
-}
-
-// ------------------------------------------------------------
+// ============================================================
 // START SERVER
-// ------------------------------------------------------------
+// ============================================================
 
 server.listen(PORT, () => {
     console.log("");
-    console.log("======================================");
-    console.log("        AIRCANVAS MEET SERVER");
-    console.log("======================================");
-    console.log(`Backend: http://localhost:${PORT}`);
     console.log(
-        `LiveKit: ${LIVEKIT_URL || "NOT CONFIGURED"}`
+        "======================================"
     );
     console.log(
+        "        AIRCANVAS MEET SERVER"
+    );
+    console.log(
+        "======================================"
+    );
+
+    console.log(
+        `Backend: http://localhost:${PORT}`
+    );
+
+    console.log(
+        `LiveKit: ${
+            LIVEKIT_URL ||
+            "NOT CONFIGURED"
+        }`
+    );
+
+    console.log(
         `Credentials: ${
-            LIVEKIT_API_KEY && LIVEKIT_API_SECRET
+            LIVEKIT_API_KEY &&
+            LIVEKIT_API_SECRET
                 ? "CONFIGURED"
                 : "MISSING"
         }`
     );
-    console.log("Host token system: ENABLED");
-    console.log("======================================");
+
+    console.log(
+        `Frontend: ${FRONTEND_URL}`
+    );
+
+    console.log(
+        "Host token system: ENABLED"
+    );
+
+    console.log(
+        "Production meeting links: ENABLED"
+    );
+
+    console.log(
+        "======================================"
+    );
+
     console.log("");
 });
