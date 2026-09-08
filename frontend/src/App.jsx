@@ -1457,11 +1457,42 @@ function App() {
             pathParts[0].toLowerCase() ===
                 "meeting"
         ) {
-            setRoomId(
-                pathParts[1].toUpperCase()
-            );
+            const currentRoomId =
+                pathParts[1].toUpperCase();
+
+            setRoomId(currentRoomId);
+
+            /*
+             * When the host creates a meeting from localhost,
+             * the browser is redirected to the production Vercel
+             * meeting URL. The host token is temporarily transferred
+             * in the URL fragment because fragments are not sent to
+             * the server. We immediately move the token into
+             * localStorage and remove the fragment from the URL.
+             */
+            const hashParams =
+                new URLSearchParams(
+                    window.location.hash.substring(1)
+                );
+
+            const transferredHostToken =
+                hashParams.get("hostToken");
+
+            if (transferredHostToken) {
+                localStorage.setItem(
+                    `aircanvas-host-${currentRoomId}`,
+                    transferredHostToken
+                );
+
+                window.history.replaceState(
+                    {},
+                    "",
+                    window.location.pathname
+                );
+            }
         }
     }, []);
+
 
     /* =====================================================
        CREATE MEETING
@@ -1499,25 +1530,45 @@ function App() {
                 }
 
                 /*
-                 * Store host token locally.
-                 * It is never placed in the URL.
+                 * Save the host token on the current origin too.
+                 * This keeps the host authenticated if the user
+                 * continues working on the same development origin.
                  */
-                localStorage.setItem(
-                    `aircanvas-host-${data.roomId}`,
-                    data.hostToken
-                );
+                if (data.hostToken) {
+                    localStorage.setItem(
+                        `aircanvas-host-${data.roomId}`,
+                        data.hostToken
+                    );
+                }
 
-                window.history.pushState(
-                    {},
-                    "",
-                    `/meeting/${data.roomId}`
-                );
+                /*
+                 * The backend now returns the public Vercel meeting
+                 * link. We must navigate to that URL instead of using
+                 * history.pushState(), because pushState() can only
+                 * change URLs on the current origin.
+                 *
+                 * The host token is transferred in the URL fragment.
+                 * Fragments are handled only by the browser and are
+                 * not sent to Render. The production App.jsx reads
+                 * the fragment, stores the token in localStorage,
+                 * and immediately removes the fragment from the URL.
+                 */
+                const meetingLink =
+                    data.meetingLink ||
+                    `https://aircanvas-meet.vercel.app/meeting/${data.roomId}`;
 
-                setRoomId(
-                    data.roomId
-                );
+                const hostToken =
+                    data.hostToken || "";
 
-                setIsHost(true);
+                const productionMeetingLink =
+                    hostToken
+                        ? `${meetingLink}#hostToken=${encodeURIComponent(
+                              hostToken
+                          )}`
+                        : meetingLink;
+
+                window.location.href =
+                    productionMeetingLink;
             } catch (err) {
                 console.error(
                     "Create meeting error:",
@@ -1528,10 +1579,11 @@ function App() {
                     err.message ||
                         "Something went wrong while creating the meeting."
                 );
-            } finally {
+
                 setLoading(false);
             }
         };
+
 
     /* =====================================================
        JOIN EXISTING MEETING
