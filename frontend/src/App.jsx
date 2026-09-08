@@ -1,4 +1,7 @@
-import { useEffect, useState } from "react";
+import {
+    useEffect,
+    useState,
+} from "react";
 
 import {
     LiveKitRoom,
@@ -10,26 +13,60 @@ import {
     useRoomContext,
 } from "@livekit/components-react";
 
-import { Track } from "livekit-client";
+import {
+    Track,
+    RoomEvent,
+} from "livekit-client";
 
 import "@livekit/components-styles";
 import "./App.css";
+import AirCanvas from "./AirCanvas";
 
-const BACKEND_URL = "https://aircanvas-meet.onrender.com";
+const BACKEND_URL =
+   "https://aircanvas-meet.onrender.com";
+
+const AIR_CANVAS_TOPIC =
+    "aircanvas-control";
 
 /* =========================================================
-   CUSTOM MEETING ROOM
+   DATA HELPERS
+========================================================= */
+
+function sendAirCanvasMessage(room, message) {
+    try {
+        const data = new TextEncoder().encode(
+            JSON.stringify(message)
+        );
+
+        room.localParticipant.publishData(
+            data,
+            {
+                reliable: true,
+                topic: AIR_CANVAS_TOPIC,
+            }
+        );
+    } catch (error) {
+        console.error(
+            "AirCanvas data error:",
+            error
+        );
+    }
+}
+
+/* =========================================================
+   MEETING ROOM
 ========================================================= */
 
 function MeetingRoom({
     roomId,
     connectionStatus,
     onLeave,
-    onAirCanvas,
+    isHost,
 }) {
     const room = useRoomContext();
 
-    const participants = useParticipants();
+    const participants =
+        useParticipants();
 
     const cameraTracks = useTracks([
         {
@@ -38,90 +75,498 @@ function MeetingRoom({
         },
     ]);
 
-    const [activePanel, setActivePanel] = useState(null);
+    const [activePanel, setActivePanel] =
+        useState(null);
 
-    const [micEnabled, setMicEnabled] = useState(true);
-    const [cameraEnabled, setCameraEnabled] = useState(true);
-    const [screenSharing, setScreenSharing] = useState(false);
+    const [micEnabled, setMicEnabled] =
+        useState(true);
 
-    const toggleMicrophone = async () => {
-        try {
-            const enabled =
-                !room.localParticipant.isMicrophoneEnabled;
+    const [cameraEnabled, setCameraEnabled] =
+        useState(true);
 
-            await room.localParticipant.setMicrophoneEnabled(
-                enabled
-            );
+    const [screenSharing, setScreenSharing] =
+        useState(false);
 
-            setMicEnabled(enabled);
-        } catch (error) {
-            console.error(
-                "Microphone toggle error:",
-                error
-            );
+    const [
+        airCanvasAllowed,
+        setAirCanvasAllowed,
+    ] = useState(false);
+
+    const [
+        airCanvasUser,
+        setAirCanvasUser,
+    ] = useState(null);
+
+    /*
+     * The host ALWAYS has AirCanvas access.
+     * A participant can additionally be granted access by the host.
+     * Host access must not disappear when a participant is granted.
+     */
+    useEffect(() => {
+        if (isHost) {
+            setAirCanvasAllowed(true);
+            setAirCanvasUser(room.localParticipant.identity);
         }
-    };
+    }, [
+        isHost,
+        room,
+    ]);
 
-    const toggleCamera = async () => {
-        try {
-            const enabled =
-                !room.localParticipant.isCameraEnabled;
+    const [
+        pendingRequest,
+        setPendingRequest,
+    ] = useState(null);
 
-            await room.localParticipant.setCameraEnabled(
-                enabled
-            );
+    /* =====================================================
+       PARTICIPANT NAME
+    ===================================================== */
 
-            setCameraEnabled(enabled);
-        } catch (error) {
-            console.error(
-                "Camera toggle error:",
-                error
-            );
-        }
-    };
+    const localName =
+        room.localParticipant.name ||
+        "Participant";
 
-    const toggleScreenShare = async () => {
-        try {
-            const enabled = !screenSharing;
+    /* =====================================================
+       AIR CANVAS DATA EVENTS
+    ===================================================== */
 
-            await room.localParticipant.setScreenShareEnabled(
-                enabled
-            );
+    useEffect(() => {
+        const handleData = (
+            payload,
+            participant,
+            kind,
+            topic
+        ) => {
+            if (
+                topic &&
+                topic !== AIR_CANVAS_TOPIC
+            ) {
+                return;
+            }
 
-            setScreenSharing(enabled);
-        } catch (error) {
-            console.error(
-                "Screen share error:",
-                error
-            );
-        }
-    };
+            try {
+                const message =
+                    JSON.parse(
+                        new TextDecoder().decode(
+                            payload
+                        )
+                    );
 
-    const handleLeave = async () => {
-        try {
-            await room.disconnect();
-        } catch (error) {
-            console.error(
-                "Disconnect error:",
-                error
-            );
-        } finally {
-            onLeave();
-        }
-    };
+                /* =========================================
+                   PARTICIPANT REQUESTS ACCESS
+                ========================================= */
 
-    const togglePanel = (panel) => {
-        setActivePanel((current) =>
-            current === panel ? null : panel
+                if (
+                    message.type ===
+                    "aircanvas-request"
+                ) {
+                    if (!isHost) {
+                        return;
+                    }
+
+                    setPendingRequest({
+                        identity:
+                            message.identity,
+                        name:
+                            message.name ||
+                            "Participant",
+                    });
+
+                    return;
+                }
+
+                /* =========================================
+                   HOST ALLOWS PARTICIPANT
+                ========================================= */
+
+                if (
+                    message.type ===
+                    "aircanvas-granted"
+                ) {
+                    /*
+                     * The host remains allowed to draw even when a
+                     * participant is granted AirCanvas.
+                     */
+                    if (isHost) {
+                        setAirCanvasAllowed(true);
+                        setAirCanvasUser(
+                            message.identity
+                        );
+                        return;
+                    }
+
+                    if (
+                        message.identity ===
+                        room.localParticipant
+                            .identity
+                    ) {
+                        setAirCanvasAllowed(true);
+                        setAirCanvasUser(
+                            message.identity
+                        );
+                    }
+
+                    return;
+                }
+
+                /* =========================================
+                   HOST REVOKES ACCESS
+                ========================================= */
+
+                if (
+                    message.type ===
+                    "aircanvas-revoked"
+                ) {
+                    if (
+                        message.identity ===
+                        room.localParticipant
+                            .identity
+                    ) {
+                        /* Host cannot be revoked from their own AirCanvas. */
+                        setAirCanvasAllowed(isHost);
+                        if (isHost) {
+                            setAirCanvasUser(
+                                room.localParticipant.identity
+                            );
+                        } else {
+                            setAirCanvasUser(null);
+                        }
+                    }
+
+                    if (
+                        message.identity ===
+                        airCanvasUser
+                    ) {
+                        if (isHost) {
+                            setAirCanvasUser(
+                                room.localParticipant.identity
+                            );
+                        } else {
+                            setAirCanvasUser(null);
+                        }
+                    }
+
+                    return;
+                }
+
+                /* =========================================
+                   HOST DENIES REQUEST
+                ========================================= */
+
+                if (
+                    message.type ===
+                    "aircanvas-denied"
+                ) {
+                    if (
+                        message.identity ===
+                        room.localParticipant
+                            .identity
+                    ) {
+                        setAirCanvasAllowed(
+                            false
+                        );
+                    }
+
+                    return;
+                }
+            } catch (error) {
+                console.error(
+                    "AirCanvas message error:",
+                    error
+                );
+            }
+        };
+
+        room.on(
+            RoomEvent.DataReceived,
+            handleData
         );
-    };
+
+        return () => {
+            room.off(
+                RoomEvent.DataReceived,
+                handleData
+            );
+        };
+    }, [
+        room,
+        isHost,
+        airCanvasUser,
+    ]);
+
+    /* =====================================================
+       MICROPHONE
+    ===================================================== */
+
+    const toggleMicrophone =
+        async () => {
+            try {
+                const enabled =
+                    !room.localParticipant
+                        .isMicrophoneEnabled;
+
+                await room.localParticipant
+                    .setMicrophoneEnabled(
+                        enabled
+                    );
+
+                setMicEnabled(
+                    enabled
+                );
+            } catch (error) {
+                console.error(
+                    "Microphone toggle error:",
+                    error
+                );
+            }
+        };
+
+    /* =====================================================
+       CAMERA
+    ===================================================== */
+
+    const toggleCamera =
+        async () => {
+            try {
+                const enabled =
+                    !room.localParticipant
+                        .isCameraEnabled;
+
+                await room.localParticipant
+                    .setCameraEnabled(
+                        enabled
+                    );
+
+                setCameraEnabled(
+                    enabled
+                );
+            } catch (error) {
+                console.error(
+                    "Camera toggle error:",
+                    error
+                );
+            }
+        };
+
+    /* =====================================================
+       SCREEN SHARE
+    ===================================================== */
+
+    const toggleScreenShare =
+        async () => {
+            try {
+                const enabled =
+                    !screenSharing;
+
+                await room.localParticipant
+                    .setScreenShareEnabled(
+                        enabled
+                    );
+
+                setScreenSharing(
+                    enabled
+                );
+            } catch (error) {
+                console.error(
+                    "Screen share error:",
+                    error
+                );
+            }
+        };
+
+    /* =====================================================
+       REQUEST AIR CANVAS
+    ===================================================== */
+
+    const requestAirCanvas =
+        () => {
+            sendAirCanvasMessage(
+                room,
+                {
+                    type:
+                        "aircanvas-request",
+                    identity:
+                        room.localParticipant
+                            .identity,
+                    name: localName,
+                }
+            );
+
+            setPendingRequest({
+                waiting: true,
+            });
+        };
+
+    /* =====================================================
+       ALLOW AIR CANVAS
+    ===================================================== */
+
+    const allowAirCanvas =
+        (identity) => {
+            if (!isHost) {
+                return;
+            }
+
+            sendAirCanvasMessage(
+                room,
+                {
+                    type:
+                        "aircanvas-granted",
+                    identity,
+                }
+            );
+
+            setAirCanvasUser(
+                identity
+            );
+
+            /*
+             * The host keeps their own AirCanvas access.
+             * The selected participant receives access separately.
+             */
+            if (isHost) {
+                setAirCanvasAllowed(true);
+            } else if (
+                identity ===
+                room.localParticipant
+                    .identity
+            ) {
+                setAirCanvasAllowed(true);
+            }
+
+            setPendingRequest(
+                null
+            );
+        };
+
+    /* =====================================================
+       DENY AIR CANVAS
+    ===================================================== */
+
+    const denyAirCanvas =
+        (identity) => {
+            if (!isHost) {
+                return;
+            }
+
+            sendAirCanvasMessage(
+                room,
+                {
+                    type:
+                        "aircanvas-denied",
+                    identity,
+                }
+            );
+
+            setPendingRequest(
+                null
+            );
+        };
+
+    /* =====================================================
+       REVOKE AIR CANVAS
+    ===================================================== */
+
+    const revokeAirCanvas =
+        (identity) => {
+            if (!isHost) {
+                return;
+            }
+
+            sendAirCanvasMessage(
+                room,
+                {
+                    type:
+                        "aircanvas-revoked",
+                    identity,
+                }
+            );
+
+            setAirCanvasUser(
+                null
+            );
+
+            if (
+                identity ===
+                room.localParticipant
+                    .identity
+            ) {
+                setAirCanvasAllowed(
+                    false
+                );
+            }
+        };
+
+    /* =====================================================
+       AIR CANVAS BUTTON
+    ===================================================== */
+
+    const handleAirCanvas =
+        () => {
+            if (isHost) {
+                setActivePanel(
+                    "aircanvas"
+                );
+
+                return;
+            }
+
+            if (airCanvasAllowed) {
+                setActivePanel(
+                    "aircanvas"
+                );
+
+                return;
+            }
+
+            if (
+                pendingRequest?.waiting
+            ) {
+                return;
+            }
+
+            requestAirCanvas();
+        };
+
+    /* =====================================================
+       LEAVE
+    ===================================================== */
+
+    const handleLeave =
+        async () => {
+            try {
+                await room.disconnect();
+            } catch (error) {
+                console.error(
+                    "Disconnect error:",
+                    error
+                );
+            } finally {
+                onLeave();
+            }
+        };
+
+    /* =====================================================
+       PANEL
+    ===================================================== */
+
+    const togglePanel =
+        (panel) => {
+            setActivePanel(
+                (current) =>
+                    current === panel
+                        ? null
+                        : panel
+            );
+        };
+
+    /* =====================================================
+       RENDER
+    ===================================================== */
 
     return (
         <div className="meeting-room">
 
-            {/* =================================================
-                TOP HEADER
-            ================================================= */}
+            {/* HEADER */}
 
             <header className="meeting-header">
 
@@ -132,7 +577,9 @@ function MeetingRoom({
                     </div>
 
                     <div>
-                        <h1>AirCanvas Meet</h1>
+                        <h1>
+                            AirCanvas Meet
+                        </h1>
 
                         <span>
                             Online Classroom
@@ -144,7 +591,7 @@ function MeetingRoom({
                 <div className="meeting-header-center">
 
                     <div className="connection-pill">
-                        <span className="connection-dot"></span>
+                        <span className="connection-dot" />
                         {connectionStatus}
                     </div>
 
@@ -155,29 +602,30 @@ function MeetingRoom({
                     <button
                         className="header-action"
                         onClick={() =>
-                            navigator.clipboard
-                                ?.writeText(
-                                    window.location.href
-                                )
+                            navigator.clipboard?.writeText(
+                                window.location.href
+                            )
                         }
                         title="Copy meeting link"
                     >
                         🔗
-                        <span>Share</span>
+                        <span>
+                            Share
+                        </span>
                     </button>
 
                     <div className="meeting-id-display">
                         Meeting ID
-                        <strong>{roomId}</strong>
+                        <strong>
+                            {roomId}
+                        </strong>
                     </div>
 
                 </div>
 
             </header>
 
-            {/* =================================================
-                MAIN MEETING AREA
-            ================================================= */}
+            {/* BODY */}
 
             <div className="meeting-body">
 
@@ -186,11 +634,12 @@ function MeetingRoom({
                     <div
                         className={`participant-grid participant-count-${Math.min(
                             cameraTracks.length,
-                            9
+                            12
                         )}`}
                     >
 
-                        {cameraTracks.length === 0 ? (
+                        {cameraTracks.length ===
+                        0 ? (
                             <div className="empty-meeting">
 
                                 <div className="empty-meeting-icon">
@@ -202,53 +651,125 @@ function MeetingRoom({
                                 </h2>
 
                                 <p>
-                                    Share the meeting link to
-                                    invite others.
+                                    Share the meeting
+                                    link to invite
+                                    others.
                                 </p>
 
                             </div>
                         ) : (
-                            cameraTracks.map((track) => (
-                                <div
-                                    className="participant-tile-wrapper"
-                                    key={
-                                        track.participant.identity
-                                    }
-                                >
+                            cameraTracks.map(
+                                (track) => (
+                                    <div
+                                        className="participant-tile-wrapper"
+                                        key={
+                                            track
+                                                .participant
+                                                .identity
+                                        }
+                                        style={{
+                                            position: "relative",
+                                            overflow: "hidden",
+                                        }}
+                                    >
 
-                                    <ParticipantTile
-                                        trackRef={track}
-                                        className="custom-participant-tile"
-                                    />
+                                        <ParticipantTile
+                                            trackRef={
+                                                track
+                                            }
+                                            className="custom-participant-tile"
+                                        />
 
-                                    <div className="participant-overlay">
+                                        {
+                                            (
+                                                /* Host always gets a canvas over their own camera. */
+                                                (
+                                                    isHost &&
+                                                    track.participant.identity ===
+                                                        room.localParticipant.identity
+                                                ) ||
+                                                /* Granted participant gets a canvas over their own camera. */
+                                                track.participant.identity ===
+                                                    airCanvasUser
+                                            ) && (
+                                                <AirCanvas
+                                                    activeUserIdentity={
+                                                        track.participant.identity
+                                                    }
+                                                    isController={
+                                                        track.participant.identity ===
+                                                            room.localParticipant.identity &&
+                                                        (
+                                                            isHost ||
+                                                            (
+                                                                airCanvasAllowed &&
+                                                                airCanvasUser ===
+                                                                    room.localParticipant.identity
+                                                            )
+                                                        )
+                                                    }
+                                                    mirror={
+                                                        track.participant.identity ===
+                                                        room.localParticipant.identity
+                                                    }
+                                                />
+                                            )
+                                        }
 
-                                        <div className="participant-name">
-                                            {track.participant.name ||
-                                                track.participant.identity}
-                                        </div>
+                                        <div className="participant-overlay">
 
-                                        <div className="participant-mic">
+                                            <div className="participant-name">
+                                                {track
+                                                    .participant
+                                                    .name ||
+                                                    track
+                                                        .participant
+                                                        .identity}
 
-                                            {track.participant.isMicrophoneEnabled
-                                                ? "🎤"
-                                                : "🔇"}
+                                                {track
+                                                    .participant
+                                                    .identity ===
+                                                    room
+                                                        .localParticipant
+                                                        .identity &&
+                                                    isHost && (
+                                                        <span>
+                                                            {" "}
+                                                            • Host
+                                                        </span>
+                                                    )}
+
+                                                {airCanvasUser ===
+                                                    track
+                                                        .participant
+                                                        .identity && (
+                                                    <span>
+                                                        {" "}
+                                                        • AirCanvas
+                                                    </span>
+                                                )}
+                                            </div>
+
+                                            <div className="participant-mic">
+                                                {track
+                                                    .participant
+                                                    .isMicrophoneEnabled
+                                                    ? "🎤"
+                                                    : "🔇"}
+                                            </div>
 
                                         </div>
 
                                     </div>
-
-                                </div>
-                            ))
+                                )
+                            )
                         )}
 
                     </div>
 
                 </main>
 
-                {/* =================================================
-                    RIGHT SIDE PANEL
-                ================================================= */}
+                {/* SIDE PANEL */}
 
                 {activePanel && (
                     <aside className="side-panel">
@@ -258,39 +779,54 @@ function MeetingRoom({
                             <div>
 
                                 {activePanel ===
-                                "participants"
-                                    ? (
-                                        <>
-                                            <h2>
-                                                Participants
-                                            </h2>
+                                "participants" ? (
+                                    <>
+                                        <h2>
+                                            Participants
+                                        </h2>
 
-                                            <span>
-                                                {
-                                                    participants.length
-                                                }{" "}
-                                                in meeting
-                                            </span>
-                                        </>
-                                    )
-                                    : (
-                                        <>
-                                            <h2>
-                                                Messages
-                                            </h2>
+                                        <span>
+                                            {
+                                                participants.length
+                                            }{" "}
+                                            in meeting
+                                        </span>
+                                    </>
+                                ) : activePanel ===
+                                  "aircanvas" ? (
+                                    <>
+                                        <h2>
+                                            AirCanvas
+                                        </h2>
 
-                                            <span>
-                                                Meeting chat
-                                            </span>
-                                        </>
-                                    )}
+                                        <span>
+                                            {isHost
+                                                ? "Host control"
+                                                : airCanvasAllowed
+                                                ? "You have access"
+                                                : "Permission required"}
+                                        </span>
+                                    </>
+                                ) : (
+                                    <>
+                                        <h2>
+                                            Messages
+                                        </h2>
+
+                                        <span>
+                                            Meeting chat
+                                        </span>
+                                    </>
+                                )}
 
                             </div>
 
                             <button
                                 className="close-panel"
                                 onClick={() =>
-                                    setActivePanel(null)
+                                    setActivePanel(
+                                        null
+                                    )
                                 }
                             >
                                 ✕
@@ -298,12 +834,16 @@ function MeetingRoom({
 
                         </div>
 
+                        {/* PARTICIPANTS */}
+
                         {activePanel ===
                             "participants" && (
                             <div className="participants-list">
 
                                 {participants.map(
-                                    (participant) => (
+                                    (
+                                        participant
+                                    ) => (
                                         <div
                                             className="participant-list-item"
                                             key={
@@ -317,7 +857,9 @@ function MeetingRoom({
                                                     participant.identity ||
                                                     "U"
                                                 )
-                                                    .charAt(0)
+                                                    .charAt(
+                                                        0
+                                                    )
                                                     .toUpperCase()}
                                             </div>
 
@@ -329,10 +871,13 @@ function MeetingRoom({
                                                 </strong>
 
                                                 {participant.identity ===
-                                                    room.localParticipant
+                                                    room
+                                                        .localParticipant
                                                         .identity && (
                                                     <span>
                                                         You
+                                                        {isHost &&
+                                                            " • Host"}
                                                     </span>
                                                 )}
 
@@ -357,10 +902,327 @@ function MeetingRoom({
                             </div>
                         )}
 
-                        {activePanel === "chat" && (
-                            <div className="chat-panel">
+                        {/* CHAT */}
 
+                        {activePanel ===
+                            "chat" && (
+                            <div className="chat-panel">
                                 <Chat />
+                            </div>
+                        )}
+
+                        {/* AIR CANVAS CONTROL */}
+
+                        {activePanel ===
+                            "aircanvas" && (
+                            <div
+                                style={{
+                                    padding:
+                                        "18px",
+                                    color:
+                                        "#dce3ee",
+                                }}
+                            >
+
+                                {isHost ? (
+                                    <>
+                                        <div
+                                            style={{
+                                                padding:
+                                                    "14px",
+                                                borderRadius:
+                                                    "10px",
+                                                background:
+                                                    "#151f31",
+                                                marginBottom:
+                                                    "15px",
+                                            }}
+                                        >
+                                            <strong>
+                                                ✋ Host
+                                                Control
+                                            </strong>
+
+                                            <p
+                                                style={{
+                                                    color:
+                                                        "#8995a9",
+                                                    fontSize:
+                                                        "12px",
+                                                    lineHeight:
+                                                        "1.5",
+                                                }}
+                                            >
+                                                You
+                                                always
+                                                have
+                                                AirCanvas
+                                                access.
+                                                Participants
+                                                must
+                                                request
+                                                permission
+                                                before
+                                                using
+                                                it.
+                                            </p>
+                                        </div>
+
+                                        {airCanvasUser ? (
+                                            <div
+                                                style={{
+                                                    padding:
+                                                        "14px",
+                                                    borderRadius:
+                                                        "10px",
+                                                    background:
+                                                        "#162b2b",
+                                                    marginBottom:
+                                                        "12px",
+                                                }}
+                                            >
+                                                <strong>
+                                                    AirCanvas
+                                                    active
+                                                </strong>
+
+                                                <p
+                                                    style={{
+                                                        margin:
+                                                            "7px 0 12px",
+                                                        color:
+                                                            "#9db2b3",
+                                                        fontSize:
+                                                            "12px",
+                                                    }}
+                                                >
+                                                    {participants.find(
+                                                        (
+                                                            p
+                                                        ) =>
+                                                            p.identity ===
+                                                            airCanvasUser
+                                                    )
+                                                        ?.name ||
+                                                        "Participant"}
+                                                    {" "}
+                                                    can
+                                                    use
+                                                    AirCanvas.
+                                                </p>
+
+                                                <button
+                                                    className="secondary-button"
+                                                    onClick={() =>
+                                                        revokeAirCanvas(
+                                                            airCanvasUser
+                                                        )
+                                                    }
+                                                >
+                                                    Revoke
+                                                    Access
+                                                </button>
+                                            </div>
+                                        ) : (
+                                            <div
+                                                style={{
+                                                    padding:
+                                                        "14px",
+                                                    borderRadius:
+                                                        "10px",
+                                                    background:
+                                                        "#151f31",
+                                                    marginBottom:
+                                                        "12px",
+                                                }}
+                                            >
+                                                <strong>
+                                                    No participant
+                                                    has control
+                                                </strong>
+
+                                                <p
+                                                    style={{
+                                                        color:
+                                                            "#8995a9",
+                                                        fontSize:
+                                                            "12px",
+                                                    }}
+                                                >
+                                                    AirCanvas
+                                                    is available
+                                                    for you.
+                                                    It will appear
+                                                    directly over
+                                                    your camera
+                                                    when active.
+                                                </p>
+                                            </div>
+                                        )}
+
+                                        {pendingRequest &&
+                                            !pendingRequest.waiting && (
+                                                <div
+                                                    style={{
+                                                        padding:
+                                                            "14px",
+                                                        borderRadius:
+                                                            "10px",
+                                                        background:
+                                                            "#202a3d",
+                                                    }}
+                                                >
+
+                                                    <strong>
+                                                        AirCanvas
+                                                        Request
+                                                    </strong>
+
+                                                    <p
+                                                        style={{
+                                                            color:
+                                                                "#c2ccda",
+                                                            fontSize:
+                                                                "13px",
+                                                        }}
+                                                    >
+                                                        {
+                                                            pendingRequest.name
+                                                        }{" "}
+                                                        wants
+                                                        to use
+                                                        AirCanvas.
+                                                    </p>
+
+                                                    <div
+                                                        style={{
+                                                            display:
+                                                                "flex",
+                                                            gap:
+                                                                "8px",
+                                                        }}
+                                                    >
+
+                                                        <button
+                                                            className="primary-button"
+                                                            onClick={() =>
+                                                                allowAirCanvas(
+                                                                    pendingRequest.identity
+                                                                )
+                                                            }
+                                                        >
+                                                            Allow
+                                                        </button>
+
+                                                        <button
+                                                            className="secondary-button"
+                                                            onClick={() =>
+                                                                denyAirCanvas(
+                                                                    pendingRequest.identity
+                                                                )
+                                                            }
+                                                        >
+                                                            Deny
+                                                        </button>
+
+                                                    </div>
+
+                                                </div>
+                                            )}
+
+                                    </>
+                                ) : airCanvasAllowed ? (
+                                    <>
+                                        <div
+                                            style={{
+                                                padding:
+                                                    "16px",
+                                                borderRadius:
+                                                    "10px",
+                                                background:
+                                                    "#162b2b",
+                                            }}
+                                        >
+                                            <strong>
+                                                ✓ AirCanvas
+                                                Access Granted
+                                            </strong>
+
+                                            <p
+                                                style={{
+                                                    color:
+                                                        "#9db2b3",
+                                                    fontSize:
+                                                        "12px",
+                                                    lineHeight:
+                                                        "1.5",
+                                                }}
+                                            >
+                                                The host has
+                                                permitted you
+                                                to use
+                                                AirCanvas.
+                                                Your drawing
+                                                canvas is
+                                                displayed
+                                                directly over
+                                                the active
+                                                camera tile.
+                                            </p>
+                                        </div>
+                                    </>
+                                ) : (
+                                    <>
+                                        <div
+                                            style={{
+                                                padding:
+                                                    "16px",
+                                                borderRadius:
+                                                    "10px",
+                                                background:
+                                                    "#151f31",
+                                            }}
+                                        >
+                                            <strong>
+                                                AirCanvas
+                                                Permission
+                                            </strong>
+
+                                            <p
+                                                style={{
+                                                    color:
+                                                        "#8995a9",
+                                                    fontSize:
+                                                        "12px",
+                                                    lineHeight:
+                                                        "1.5",
+                                                }}
+                                            >
+                                                You need
+                                                permission
+                                                from the
+                                                meeting host
+                                                before you
+                                                can use
+                                                AirCanvas.
+                                            </p>
+
+                                            <button
+                                                className="primary-button"
+                                                onClick={
+                                                    requestAirCanvas
+                                                }
+                                                disabled={
+                                                    pendingRequest?.waiting
+                                                }
+                                            >
+                                                {pendingRequest?.waiting
+                                                    ? "Request Sent..."
+                                                    : "Request AirCanvas"}
+                                            </button>
+                                        </div>
+                                    </>
+                                )}
 
                             </div>
                         )}
@@ -370,9 +1232,7 @@ function MeetingRoom({
 
             </div>
 
-            {/* =================================================
-                BOTTOM CONTROL BAR
-            ================================================= */}
+            {/* CONTROLS */}
 
             <div className="meeting-controls">
 
@@ -389,7 +1249,9 @@ function MeetingRoom({
                                 ? "Mute"
                                 : "Unmute"
                         }
-                        active={micEnabled}
+                        active={
+                            micEnabled
+                        }
                         onClick={
                             toggleMicrophone
                         }
@@ -402,7 +1264,9 @@ function MeetingRoom({
                                 ? "Camera"
                                 : "Camera Off"
                         }
-                        active={cameraEnabled}
+                        active={
+                            cameraEnabled
+                        }
                         onClick={
                             toggleCamera
                         }
@@ -431,7 +1295,9 @@ function MeetingRoom({
                             "chat"
                         }
                         onClick={() =>
-                            togglePanel("chat")
+                            togglePanel(
+                                "chat"
+                            )
                         }
                     />
 
@@ -451,11 +1317,22 @@ function MeetingRoom({
 
                     <ControlButton
                         icon="✋"
-                        label="AirCanvas"
-                        active={false}
+                        label={
+                            isHost
+                                ? "AirCanvas"
+                                : airCanvasAllowed
+                                ? "AirCanvas"
+                                : pendingRequest?.waiting
+                                ? "Requested"
+                                : "Request Canvas"
+                        }
+                        active={
+                            activePanel ===
+                            "aircanvas"
+                        }
                         special
                         onClick={
-                            onAirCanvas
+                            handleAirCanvas
                         }
                     />
 
@@ -465,10 +1342,17 @@ function MeetingRoom({
 
                     <button
                         className="leave-button"
-                        onClick={handleLeave}
+                        onClick={
+                            handleLeave
+                        }
                     >
-                        <span>🚪</span>
-                        <span>Leave</span>
+                        <span>
+                            🚪
+                        </span>
+
+                        <span>
+                            Leave
+                        </span>
                     </button>
 
                 </div>
@@ -496,8 +1380,14 @@ function ControlButton({
         <button
             type="button"
             className={`meeting-control-button ${
-                active ? "active" : ""
-            } ${special ? "aircanvas-control" : ""}`}
+                active
+                    ? "active"
+                    : ""
+            } ${
+                special
+                    ? "aircanvas-control"
+                    : ""
+            }`}
             onClick={onClick}
             title={label}
         >
@@ -517,12 +1407,16 @@ function ControlButton({
 ========================================================= */
 
 function App() {
-    const [roomId, setRoomId] = useState(null);
+    const [roomId, setRoomId] =
+        useState(null);
 
-    const [participantName, setParticipantName] =
+    const [
+        participantName,
+        setParticipantName,
+    ] = useState("");
+
+    const [token, setToken] =
         useState("");
-
-    const [token, setToken] = useState("");
 
     const [serverUrl, setServerUrl] =
         useState("");
@@ -533,11 +1427,24 @@ function App() {
     const [error, setError] =
         useState("");
 
-    const [joinRoomInput, setJoinRoomInput] =
-        useState("");
+    const [
+        joinRoomInput,
+        setJoinRoomInput,
+    ] = useState("");
 
-    const [connectionStatus, setConnectionStatus] =
-        useState("Not connected");
+    const [
+        connectionStatus,
+        setConnectionStatus,
+    ] = useState(
+        "Not connected"
+    );
+
+    const [isHost, setIsHost] =
+        useState(false);
+
+    /* =====================================================
+       READ ROOM FROM URL
+    ===================================================== */
 
     useEffect(() => {
         const pathParts =
@@ -560,154 +1467,239 @@ function App() {
        CREATE MEETING
     ===================================================== */
 
-    const createMeeting = async () => {
-        try {
-            setLoading(true);
-            setError("");
+    const createMeeting =
+        async () => {
+            try {
+                setLoading(true);
+                setError("");
 
-            const response = await fetch(
-                `${BACKEND_URL}/api/meeting/create`,
-                {
-                    method: "POST",
-                    headers: {
-                        "Content-Type":
-                            "application/json",
-                    },
+                const response =
+                    await fetch(
+                        `${BACKEND_URL}/api/meeting/create`,
+                        {
+                            method: "POST",
+                            headers: {
+                                "Content-Type":
+                                    "application/json",
+                            },
+                        }
+                    );
+
+                const data =
+                    await response.json();
+
+                if (
+                    !response.ok ||
+                    !data.success
+                ) {
+                    throw new Error(
+                        data.message ||
+                            "Unable to create meeting."
+                    );
                 }
-            );
 
-            const data =
-                await response.json();
-
-            if (
-                !response.ok ||
-                !data.success
-            ) {
-                throw new Error(
-                    data.message ||
-                        "Unable to create meeting."
+                /*
+                 * Store host token locally.
+                 * It is never placed in the URL.
+                 */
+                localStorage.setItem(
+                    `aircanvas-host-${data.roomId}`,
+                    data.hostToken
                 );
+
+                window.history.pushState(
+                    {},
+                    "",
+                    `/meeting/${data.roomId}`
+                );
+
+                setRoomId(
+                    data.roomId
+                );
+
+                setIsHost(true);
+            } catch (err) {
+                console.error(
+                    "Create meeting error:",
+                    err
+                );
+
+                setError(
+                    err.message ||
+                        "Something went wrong while creating the meeting."
+                );
+            } finally {
+                setLoading(false);
             }
-
-            window.history.pushState(
-                {},
-                "",
-                `/meeting/${data.roomId}`
-            );
-
-            setRoomId(data.roomId);
-        } catch (err) {
-            console.error(
-                "Create meeting error:",
-                err
-            );
-
-            setError(
-                err.message ||
-                    "Something went wrong while creating the meeting."
-            );
-        } finally {
-            setLoading(false);
-        }
-    };
+        };
 
     /* =====================================================
        JOIN EXISTING MEETING
     ===================================================== */
 
-    const joinExistingMeeting = () => {
-        const cleanRoomId =
-            joinRoomInput
-                .trim()
-                .toUpperCase();
+    const joinExistingMeeting =
+        () => {
+            const cleanRoomId =
+                joinRoomInput
+                    .trim()
+                    .toUpperCase();
 
-        if (!cleanRoomId) {
-            setError(
-                "Please enter a meeting ID."
-            );
-            return;
-        }
-
-        setError("");
-
-        window.history.pushState(
-            {},
-            "",
-            `/meeting/${cleanRoomId}`
-        );
-
-        setRoomId(cleanRoomId);
-    };
-
-    /* =====================================================
-       GET LIVEKIT TOKEN
-    ===================================================== */
-
-    const joinMeeting = async () => {
-        if (!participantName.trim()) {
-            setError(
-                "Please enter your name."
-            );
-            return;
-        }
-
-        if (!roomId) {
-            setError(
-                "Meeting ID is missing."
-            );
-            return;
-        }
-
-        try {
-            setLoading(true);
-            setError("");
-
-            setConnectionStatus(
-                "Requesting access..."
-            );
-
-            const response = await fetch(
-                `${BACKEND_URL}/api/meeting/token`,
-                {
-                    method: "POST",
-                    headers: {
-                        "Content-Type":
-                            "application/json",
-                    },
-                    body: JSON.stringify({
-                        roomId,
-                        participantName:
-                            participantName.trim(),
-                    }),
-                }
-            );
-
-            const data =
-                await response.json();
-
-            if (
-                !response.ok ||
-                !data.success
-            ) {
-                throw new Error(
-                    data.message ||
-                        "Unable to get meeting access."
+            if (!cleanRoomId) {
+                setError(
+                    "Please enter a meeting ID."
                 );
+                return;
             }
 
+            setError("");
+
+            window.history.pushState(
+                {},
+                "",
+                `/meeting/${cleanRoomId}`
+            );
+
+            setRoomId(
+                cleanRoomId
+            );
+        };
+
+    /* =====================================================
+       JOIN MEETING
+    ===================================================== */
+
+    const joinMeeting =
+        async () => {
+            if (
+                !participantName.trim()
+            ) {
+                setError(
+                    "Please enter your name."
+                );
+                return;
+            }
+
+            if (!roomId) {
+                setError(
+                    "Meeting ID is missing."
+                );
+                return;
+            }
+
+            try {
+                setLoading(true);
+                setError("");
+
+                setConnectionStatus(
+                    "Requesting access..."
+                );
+
+                /*
+                 * Only the creator's browser
+                 * will have this token.
+                 */
+                const hostToken =
+                    localStorage.getItem(
+                        `aircanvas-host-${roomId}`
+                    );
+
+                const response =
+                    await fetch(
+                        `${BACKEND_URL}/api/meeting/token`,
+                        {
+                            method: "POST",
+                            headers: {
+                                "Content-Type":
+                                    "application/json",
+                            },
+                            body: JSON.stringify(
+                                {
+                                    roomId,
+                                    participantName:
+                                        participantName.trim(),
+                                    hostToken:
+                                        hostToken ||
+                                        undefined,
+                                }
+                            ),
+                        }
+                    );
+
+                const data =
+                    await response.json();
+
+                if (
+                    !response.ok ||
+                    !data.success
+                ) {
+                    throw new Error(
+                        data.message ||
+                            "Unable to get meeting access."
+                    );
+                }
+
+                setIsHost(
+                    Boolean(
+                        data.isHost
+                    )
+                );
+
+                setConnectionStatus(
+                    "Connecting..."
+                );
+
+                setToken(
+                    data.token
+                );
+
+                setServerUrl(
+                    data.serverUrl
+                );
+            } catch (err) {
+                console.error(
+                    "Meeting token error:",
+                    err
+                );
+
+                setConnectionStatus(
+                    "Connection failed"
+                );
+
+                setError(
+                    err.message ||
+                        "Unable to connect to the meeting."
+                );
+            } finally {
+                setLoading(false);
+            }
+        };
+
+    /* =====================================================
+       CONNECTED
+    ===================================================== */
+
+    const handleConnected =
+        () => {
+            console.log(
+                "LIVEKIT CONNECTED SUCCESSFULLY"
+            );
+
             setConnectionStatus(
-                "Connecting..."
+                "Connected"
             );
 
-            setToken(data.token);
+            setError("");
+        };
 
-            setServerUrl(
-                data.serverUrl
-            );
-        } catch (err) {
+    /* =====================================================
+       LIVEKIT ERROR
+    ===================================================== */
+
+    const handleLiveKitError =
+        (liveKitError) => {
             console.error(
-                "Meeting token error:",
-                err
+                "LIVEKIT CONNECTION ERROR:",
+                liveKitError
             );
 
             setConnectionStatus(
@@ -715,125 +1707,89 @@ function App() {
             );
 
             setError(
-                err.message ||
-                    "Unable to connect to the meeting."
+                liveKitError?.message ||
+                    "LiveKit could not connect."
             );
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    /* =====================================================
-       CONNECTED
-    ===================================================== */
-
-    const handleConnected = () => {
-        console.log(
-            "LIVEKIT CONNECTED SUCCESSFULLY"
-        );
-
-        setConnectionStatus(
-            "Connected"
-        );
-
-        setError("");
-    };
-
-    /* =====================================================
-       LIVEKIT ERROR
-    ===================================================== */
-
-    const handleLiveKitError = (
-        liveKitError
-    ) => {
-        console.error(
-            "LIVEKIT CONNECTION ERROR:",
-            liveKitError
-        );
-
-        setConnectionStatus(
-            "Connection failed"
-        );
-
-        setError(
-            liveKitError?.message ||
-                "LiveKit could not connect."
-        );
-    };
+        };
 
     /* =====================================================
        MEDIA FAILURE
     ===================================================== */
 
-    const handleMediaDeviceFailure = (
-        failure,
-        kind
-    ) => {
-        console.error(
-            "MEDIA DEVICE ERROR:",
-            failure
-        );
+    const handleMediaDeviceFailure =
+        (failure, kind) => {
+            console.error(
+                "MEDIA DEVICE ERROR:",
+                failure
+            );
 
-        setConnectionStatus(
-            "Media device problem"
-        );
+            setConnectionStatus(
+                "Media device problem"
+            );
 
-        setError(
-            `Could not access your ${
-                kind === "audioinput"
-                    ? "microphone"
-                    : kind === "videoinput"
-                    ? "camera"
-                    : "media device"
-            }. Please check browser permissions.`
-        );
-    };
+            setError(
+                `Could not access your ${
+                    kind ===
+                    "audioinput"
+                        ? "microphone"
+                        : kind ===
+                          "videoinput"
+                        ? "camera"
+                        : "media device"
+                }. Please check browser permissions.`
+            );
+        };
 
     /* =====================================================
        DISCONNECTED
     ===================================================== */
 
-    const handleDisconnected = (
-        reason
-    ) => {
-        console.warn(
-            "LIVEKIT DISCONNECTED:",
-            reason
-        );
+    const handleDisconnected =
+        (reason) => {
+            console.warn(
+                "LIVEKIT DISCONNECTED:",
+                reason
+            );
 
-        setConnectionStatus(
-            "Disconnected"
-        );
-    };
+            setConnectionStatus(
+                "Disconnected"
+            );
+        };
 
     /* =====================================================
-       LEAVE MEETING
+       LEAVE
     ===================================================== */
 
-    const leaveMeeting = () => {
-        setToken("");
-        setServerUrl("");
-        setParticipantName("");
-        setError("");
+    const leaveMeeting =
+        () => {
+            setToken("");
+            setServerUrl("");
+            setParticipantName("");
+            setError("");
 
-        setConnectionStatus(
-            "Not connected"
-        );
+            setConnectionStatus(
+                "Not connected"
+            );
 
-        window.history.pushState(
-            {},
-            "",
-            "/"
-        );
+            setIsHost(false);
 
-        setRoomId(null);
-    };
+            window.history.pushState(
+                {},
+                "",
+                "/"
+            );
+
+            setRoomId(null);
+        };
 
     /* =====================================================
        REAL MEETING
     ===================================================== */
 
-    if (token && serverUrl) {
+    if (
+        token &&
+        serverUrl
+    ) {
         return (
             <div className="meeting-app">
 
@@ -864,11 +1820,7 @@ function App() {
                         onLeave={
                             leaveMeeting
                         }
-                        onAirCanvas={() =>
-                            alert(
-                                "AirCanvas integration comes next. The four core gestures remain unchanged."
-                            )
-                        }
+                        isHost={isHost}
                     />
                 </LiveKitRoom>
 
@@ -926,13 +1878,17 @@ function App() {
                         value={
                             participantName
                         }
-                        onChange={(event) =>
+                        onChange={(
+                            event
+                        ) =>
                             setParticipantName(
                                 event.target
                                     .value
                             )
                         }
-                        onKeyDown={(event) => {
+                        onKeyDown={(
+                            event
+                        ) => {
                             if (
                                 event.key ===
                                 "Enter"
@@ -950,8 +1906,12 @@ function App() {
 
                     <button
                         className="primary-button"
-                        onClick={joinMeeting}
-                        disabled={loading}
+                        onClick={
+                            joinMeeting
+                        }
+                        disabled={
+                            loading
+                        }
                     >
                         {loading
                             ? "Connecting..."
@@ -967,7 +1927,10 @@ function App() {
                                 "/"
                             );
 
-                            setRoomId(null);
+                            setRoomId(
+                                null
+                            );
+
                             setError("");
                         }}
                     >
@@ -1004,8 +1967,12 @@ function App() {
 
                 <button
                     className="primary-button"
-                    onClick={createMeeting}
-                    disabled={loading}
+                    onClick={
+                        createMeeting
+                    }
+                    disabled={
+                        loading
+                    }
                 >
                     {loading
                         ? "Creating..."
@@ -1013,7 +1980,9 @@ function App() {
                 </button>
 
                 <div className="divider">
-                    <span>OR</span>
+                    <span>
+                        OR
+                    </span>
                 </div>
 
                 <label>
@@ -1023,13 +1992,20 @@ function App() {
                 <input
                     type="text"
                     placeholder="Enter meeting ID"
-                    value={joinRoomInput}
-                    onChange={(event) =>
+                    value={
+                        joinRoomInput
+                    }
+                    onChange={(
+                        event
+                    ) =>
                         setJoinRoomInput(
-                            event.target.value
+                            event.target
+                                .value
                         )
                     }
-                    onKeyDown={(event) => {
+                    onKeyDown={(
+                        event
+                    ) => {
                         if (
                             event.key ===
                             "Enter"
@@ -1068,12 +2044,12 @@ function App() {
 
                     <div>
                         <span>✓</span>
-                        Shareable meeting links
+                        Host-controlled AirCanvas
                     </div>
 
                     <div>
                         <span>✓</span>
-                        Collaborative AirCanvas
+                        AI gesture interaction
                     </div>
 
                 </div>

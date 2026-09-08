@@ -397,11 +397,15 @@ body {
     height: 100%;
     display: grid;
     gap: 10px;
+
+    /* Changed for larger meetings */
     grid-template-columns: repeat(
         auto-fit,
-        minmax(280px, 1fr)
+        minmax(240px, 1fr)
     );
-    grid-auto-rows: minmax(200px, 1fr);
+
+    grid-auto-rows: minmax(180px, 1fr);
+    align-content: start;
 }
 
 .participant-tile-wrapper {
@@ -762,9 +766,12 @@ body {
 
     .participant-grid {
         grid-template-columns: repeat(
-            auto-fit,
-            minmax(220px, 1fr)
+            2,
+            minmax(0, 1fr)
         );
+
+        grid-auto-rows: minmax(170px, 1fr);
+        align-content: start;
     }
 }
 
@@ -796,8 +803,14 @@ body {
     }
 
     .participant-grid {
-        grid-template-columns: 1fr;
-        grid-auto-rows: minmax(190px, 1fr);
+        grid-template-columns: repeat(
+            2,
+            minmax(0, 1fr)
+        );
+
+        grid-auto-rows: 180px;
+        align-content: start;
+        gap: 7px;
     }
 
     .meeting-controls {

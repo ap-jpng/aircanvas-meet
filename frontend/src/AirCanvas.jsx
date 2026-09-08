@@ -1,0 +1,1470 @@
+import { useEffect, useRef } from "react";
+import { useRoomContext } from "@livekit/components-react";
+import { RoomEvent, Track } from "livekit-client";
+import knnModel from "./knn_model.json";
+
+const TOPIC = "aircanvas-drawing";
+const LABELS = ["DRAW", "ERASE", "CLEAR", "NONE"];
+
+function featuresFromLandmarks(landmarks, mirrorX = false) {
+    const wrist = landmarks[0];
+    const features = [];
+
+    for (const point of landmarks) {
+        // The trained model is right-hand oriented.  For a left hand,
+        // reflecting X around the wrist converts it into the same canonical
+        // shape without changing the user's actual drawing coordinates.
+        const relativeX = point.x - wrist.x;
+        const canonicalX = mirrorX
+            ? -relativeX
+            : relativeX;
+
+        features.push(canonicalX);
+        features.push(point.y - wrist.y);
+        features.push(point.z - wrist.z);
+    }
+
+    return features;
+}
+
+function predictKNN(features) {
+    let bestDistance = Infinity;
+    let bestLabel = 3;
+
+    const scaledFeatures = new Array(63);
+
+    for (let j = 0; j < 63; j += 1) {
+        const scale = knnModel.scale[j] || 1;
+        scaledFeatures[j] =
+            (features[j] - knnModel.mean[j]) / scale;
+    }
+
+    for (let i = 0; i < knnModel.trainX.length; i += 1) {
+        const row = knnModel.trainX[i];
+        let distance = 0;
+
+        for (let j = 0; j < 63; j += 1) {
+            const diff = scaledFeatures[j] - row[j];
+            distance += diff * diff;
+
+            if (distance >= bestDistance) {
+                break;
+            }
+        }
+
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            bestLabel = Number(knnModel.trainY[i]);
+        }
+    }
+
+    return {
+        label: LABELS[bestLabel] || "NONE",
+        distance: bestDistance,
+    };
+}
+
+/*
+ * The original training set is right-hand oriented.  We therefore classify
+ * both the detected hand and its X-reflected version and use whichever is
+ * closer to the trained gesture space.  This makes the same four gestures
+ * work naturally for left- and right-handed writers without retraining.
+ */
+function predictHandGesture(landmarks) {
+    const normalFeatures =
+        featuresFromLandmarks(landmarks, false);
+
+    const mirroredFeatures =
+        featuresFromLandmarks(landmarks, true);
+
+    const normalPrediction =
+        predictKNN(normalFeatures);
+
+    const mirroredPrediction =
+        predictKNN(mirroredFeatures);
+
+    if (
+        mirroredPrediction.distance <
+        normalPrediction.distance
+    ) {
+        return mirroredPrediction.label;
+    }
+
+    return normalPrediction.label;
+}
+
+function smoothPoint(previous, current, alpha = 0.58) {
+    if (!previous) return current;
+
+    return {
+        x:
+            previous.x +
+            (current.x - previous.x) * alpha,
+        y:
+            previous.y +
+            (current.y - previous.y) * alpha,
+    };
+}
+
+/*
+ * MediaPipe coordinates are normalized against the actual camera frame.
+ * ParticipantTile normally uses object-fit: cover, so simply multiplying
+ * x/y by the canvas size can be wrong when the aspect ratios differ.
+ *
+ * This function reproduces the object-fit: cover transform so that the
+ * annotation stays on the same visual position as the hand/video.
+ */
+function normalizedToCanvas(
+    point,
+    canvasWidth,
+    canvasHeight,
+    videoWidth,
+    videoHeight,
+    mirrored
+) {
+    if (!point) return null;
+
+    if (
+        !videoWidth ||
+        !videoHeight ||
+        !canvasWidth ||
+        !canvasHeight
+    ) {
+        return {
+            x: point.x * canvasWidth,
+            y: point.y * canvasHeight,
+        };
+    }
+
+    const scale = Math.max(
+        canvasWidth / videoWidth,
+        canvasHeight / videoHeight
+    );
+
+    const renderedWidth =
+        videoWidth * scale;
+
+    const renderedHeight =
+        videoHeight * scale;
+
+    const offsetX =
+        (canvasWidth - renderedWidth) / 2;
+
+    const offsetY =
+        (canvasHeight - renderedHeight) / 2;
+
+    const sourceX = mirrored
+        ? 1 - point.x
+        : point.x;
+
+    return {
+        x:
+            offsetX +
+            sourceX * renderedWidth,
+        y:
+            offsetY +
+            point.y * renderedHeight,
+    };
+}
+
+function getCanvasPoint(
+    point,
+    canvas,
+    video,
+    mirrored
+) {
+    return normalizedToCanvas(
+        point,
+        canvas.clientWidth || canvas.width,
+        canvas.clientHeight || canvas.height,
+        video?.videoWidth || 0,
+        video?.videoHeight || 0,
+        mirrored
+    );
+}
+
+function drawLine(
+    ctx,
+    from,
+    to,
+    mode,
+    width
+) {
+    if (!from || !to) return;
+
+    ctx.save();
+
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = width;
+
+    if (mode === "ERASE") {
+        ctx.globalCompositeOperation =
+            "destination-out";
+    } else {
+        ctx.globalCompositeOperation =
+            "source-over";
+        ctx.strokeStyle = "#00ff66";
+    }
+
+    ctx.beginPath();
+    ctx.moveTo(from.x, from.y);
+    ctx.lineTo(to.x, to.y);
+    ctx.stroke();
+
+    ctx.restore();
+}
+
+function drawDot(
+    ctx,
+    point,
+    mode,
+    width
+) {
+    if (!point) return;
+
+    ctx.save();
+
+    ctx.globalCompositeOperation =
+        mode === "ERASE"
+            ? "destination-out"
+            : "source-over";
+
+    ctx.fillStyle = "#00ff66";
+
+    ctx.beginPath();
+    ctx.arc(
+        point.x,
+        point.y,
+        width / 2,
+        0,
+        Math.PI * 2
+    );
+    ctx.fill();
+
+    ctx.restore();
+}
+
+export default function AirCanvas({
+    activeUserIdentity,
+    isController = false,
+    mirror = false,
+}) {
+    const room = useRoomContext();
+
+    const canvasRef =
+        useRef(null);
+
+    const processingVideoRef =
+        useRef(null);
+
+    const handsRef =
+        useRef(null);
+
+    const animationRef =
+        useRef(null);
+
+    const lastPointRef =
+        useRef(null);
+
+    const lastModeRef =
+        useRef("NONE");
+
+    const candidateModeRef =
+        useRef("NONE");
+
+    const candidateCountRef =
+        useRef(0);
+
+    const stableModeRef =
+        useRef("NONE");
+
+    const clearTriggeredRef =
+        useRef(false);
+
+    const historyRef =
+        useRef([]);
+
+    const processingRef =
+        useRef(false);
+
+    const lastVideoTrackIdRef =
+        useRef(null);
+
+    const mountedRef =
+        useRef(true);
+
+    const send = async (
+        message,
+        reliable = false
+    ) => {
+        try {
+            const payload =
+                new TextEncoder().encode(
+                    JSON.stringify({
+                        ...message,
+                        sourceIdentity:
+                            room.localParticipant.identity,
+                        targetIdentity:
+                            message.targetIdentity ||
+                            activeUserIdentity,
+                    })
+                );
+
+            await room.localParticipant.publishData(
+                payload,
+                {
+                    reliable,
+                    topic: TOPIC,
+                }
+            );
+        } catch (error) {
+            console.error(
+                "AirCanvas data error:",
+                error
+            );
+        }
+    };
+
+    const resizeCanvas = () => {
+        const canvas =
+            canvasRef.current;
+
+        if (!canvas) return;
+
+        const rect =
+            canvas.getBoundingClientRect();
+
+        const dpr =
+            window.devicePixelRatio || 1;
+
+        const width =
+            Math.max(
+                1,
+                Math.round(
+                    rect.width * dpr
+                )
+            );
+
+        const height =
+            Math.max(
+                1,
+                Math.round(
+                    rect.height * dpr
+                )
+            );
+
+        if (
+            canvas.width === width &&
+            canvas.height === height
+        ) {
+            return;
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+
+        const ctx =
+            canvas.getContext("2d");
+
+        ctx.setTransform(
+            dpr,
+            0,
+            0,
+            dpr,
+            0,
+            0
+        );
+
+        redrawHistory();
+    };
+
+    const redrawHistory = () => {
+        const canvas =
+            canvasRef.current;
+
+        if (!canvas) return;
+
+        const ctx =
+            canvas.getContext("2d");
+
+        const cssWidth =
+            canvas.clientWidth;
+
+        const cssHeight =
+            canvas.clientHeight;
+
+        ctx.clearRect(
+            0,
+            0,
+            cssWidth,
+            cssHeight
+        );
+
+        const video =
+            processingVideoRef.current;
+
+        for (
+            const event of historyRef.current
+        ) {
+            if (
+                event.type ===
+                "clear"
+            ) {
+                ctx.clearRect(
+                    0,
+                    0,
+                    cssWidth,
+                    cssHeight
+                );
+                continue;
+            }
+
+            if (
+                event.type ===
+                "dot"
+            ) {
+                const point =
+                    getCanvasPoint(
+                        event.point,
+                        canvas,
+                        video,
+                        mirror
+                    );
+
+                drawDot(
+                    ctx,
+                    point,
+                    event.mode,
+                    event.width
+                );
+
+                continue;
+            }
+
+            if (
+                event.type ===
+                "line"
+            ) {
+                const from =
+                    getCanvasPoint(
+                        event.from,
+                        canvas,
+                        video,
+                        mirror
+                    );
+
+                const to =
+                    getCanvasPoint(
+                        event.to,
+                        canvas,
+                        video,
+                        mirror
+                    );
+
+                drawLine(
+                    ctx,
+                    from,
+                    to,
+                    event.mode,
+                    event.width
+                );
+            }
+        }
+    };
+
+    const addEvent = (
+        event
+    ) => {
+        historyRef.current.push(
+            event
+        );
+
+        if (
+            historyRef.current.length >
+            12000
+        ) {
+            historyRef.current.splice(
+                0,
+                2000
+            );
+        }
+    };
+
+    const clearLocalCanvas = (
+        record = true
+    ) => {
+        const canvas =
+            canvasRef.current;
+
+        if (!canvas) return;
+
+        const ctx =
+            canvas.getContext("2d");
+
+        ctx.clearRect(
+            0,
+            0,
+            canvas.clientWidth,
+            canvas.clientHeight
+        );
+
+        if (record) {
+            addEvent({
+                type: "clear",
+            });
+        }
+
+        lastPointRef.current =
+            null;
+
+        lastModeRef.current =
+            "NONE";
+
+        candidateModeRef.current =
+            "NONE";
+
+        candidateCountRef.current =
+            0;
+
+        stableModeRef.current =
+            "NONE";
+    };
+
+    const processGesture =
+        (results) => {
+            if (!isController) {
+                return;
+            }
+
+            const canvas =
+                canvasRef.current;
+
+            const video =
+                processingVideoRef.current;
+
+            if (
+                !canvas ||
+                !video
+            ) {
+                return;
+            }
+
+            if (
+                !results
+                    ?.multiHandLandmarks
+                    ?.length
+            ) {
+                lastPointRef.current =
+                    null;
+
+                lastModeRef.current =
+                    "NONE";
+
+                candidateModeRef.current =
+                    "NONE";
+
+                candidateCountRef.current =
+                    0;
+
+                stableModeRef.current =
+                    "NONE";
+
+                clearTriggeredRef.current =
+                    false;
+
+                return;
+            }
+
+            const landmarks =
+                results
+                    .multiHandLandmarks[0];
+
+            if (
+                !landmarks ||
+                landmarks.length <
+                    21
+            ) {
+                lastPointRef.current =
+                    null;
+
+                lastModeRef.current =
+                    "NONE";
+
+                candidateModeRef.current =
+                    "NONE";
+
+                candidateCountRef.current =
+                    0;
+
+                stableModeRef.current =
+                    "NONE";
+
+                clearTriggeredRef.current =
+                    false;
+
+                return;
+            }
+
+            const detectedGesture =
+                predictHandGesture(
+                    landmarks
+                );
+
+            /*
+             * Stabilize the gesture before drawing.  CLEAR gets a slightly
+             * shorter confirmation because a closed fist is intentionally a
+             * discrete command.  DRAW and ERASE need a few frames so brief
+             * MediaPipe pose changes do not break the stroke.
+             */
+            if (
+                detectedGesture ===
+                candidateModeRef.current
+            ) {
+                candidateCountRef.current += 1;
+            } else {
+                candidateModeRef.current =
+                    detectedGesture;
+                candidateCountRef.current =
+                    1;
+            }
+
+            const confirmFrames =
+                detectedGesture ===
+                "CLEAR"
+                    ? 2
+                    : 3;
+
+            if (
+                candidateCountRef.current >=
+                confirmFrames
+            ) {
+                stableModeRef.current =
+                    detectedGesture;
+            }
+
+            const gesture =
+                stableModeRef.current;
+
+            if (gesture === "CLEAR") {
+                lastPointRef.current =
+                    null;
+
+                lastModeRef.current =
+                    "CLEAR";
+
+                if (!clearTriggeredRef.current) {
+                    clearTriggeredRef.current =
+                        true;
+
+                    clearLocalCanvas(
+                        true
+                    );
+
+                    clearTriggeredRef.current =
+                        true;
+
+                    send(
+                        {
+                            type:
+                                "canvas-event",
+                            event: {
+                                type:
+                                    "clear",
+                                targetIdentity:
+                                    activeUserIdentity,
+                            },
+                        },
+                        true
+                    );
+                }
+
+                return;
+            }
+
+            if (gesture !== "CLEAR") {
+                clearTriggeredRef.current =
+                    false;
+            }
+
+            if (
+                gesture !== "DRAW" &&
+                gesture !== "ERASE"
+            ) {
+                lastPointRef.current =
+                    null;
+
+                lastModeRef.current =
+                    "NONE";
+
+                return;
+            }
+
+            const rawPoint = {
+                x: Math.max(
+                    0,
+                    Math.min(
+                        1,
+                        landmarks[8].x
+                    )
+                ),
+                y: Math.max(
+                    0,
+                    Math.min(
+                        1,
+                        landmarks[8].y
+                    )
+                ),
+            };
+
+            const point =
+                smoothPoint(
+                    lastPointRef.current,
+                    rawPoint
+                );
+
+            const width =
+                gesture === "ERASE"
+                    ? 68
+                    : 4;
+
+            const ctx =
+                canvas.getContext(
+                    "2d"
+                );
+
+            const canvasPoint =
+                getCanvasPoint(
+                    point,
+                    canvas,
+                    video,
+                    mirror
+                );
+
+            if (
+                lastModeRef.current !==
+                    gesture ||
+                !lastPointRef.current
+            ) {
+                lastPointRef.current =
+                    point;
+
+                lastModeRef.current =
+                    gesture;
+
+                drawDot(
+                    ctx,
+                    canvasPoint,
+                    gesture,
+                    width
+                );
+
+                const event = {
+                    type: "dot",
+                    mode: gesture,
+                    point,
+                    width,
+                    targetIdentity: activeUserIdentity,
+                };
+
+                addEvent(event);
+
+                send(
+                    {
+                        type:
+                            "canvas-event",
+                        event,
+                    },
+                    false
+                );
+
+                return;
+            }
+
+            const distance =
+                Math.hypot(
+                    point.x -
+                        lastPointRef.current
+                            .x,
+                    point.y -
+                        lastPointRef.current
+                            .y
+                );
+
+            /*
+             * A very large jump means the hand tracking
+             * temporarily lost the finger. Start again
+             * instead of drawing a diagonal across the board.
+             */
+            if (
+                distance >
+                0.12
+            ) {
+                lastPointRef.current =
+                    point;
+
+                return;
+            }
+
+            const event = {
+                type: "line",
+                mode: gesture,
+                from:
+                    lastPointRef.current,
+                to: point,
+                width,
+                targetIdentity: activeUserIdentity,
+            };
+
+            const from =
+                getCanvasPoint(
+                    event.from,
+                    canvas,
+                    video,
+                    mirror
+                );
+
+            const to =
+                getCanvasPoint(
+                    event.to,
+                    canvas,
+                    video,
+                    mirror
+                );
+
+            drawLine(
+                ctx,
+                from,
+                to,
+                gesture,
+                width
+            );
+
+            addEvent(event);
+
+            send(
+                {
+                    type:
+                        "canvas-event",
+                    event,
+                },
+                false
+            );
+
+            lastPointRef.current =
+                point;
+        };
+
+    /*
+     * Receive drawing events from every participant.
+     * Every client renders the same normalized coordinates
+     * over the active participant's video tile.
+     */
+    useEffect(() => {
+        const handler = (
+            payload,
+            _participant,
+            _kind,
+            topic
+        ) => {
+            if (
+                topic !== TOPIC
+            ) {
+                return;
+            }
+
+            try {
+                const message =
+                    JSON.parse(
+                        new TextDecoder().decode(
+                            payload
+                        )
+                    );
+
+                if (
+                    message.type !==
+                    "canvas-event"
+                ) {
+                    return;
+                }
+
+                const event =
+                    message.event;
+
+                if (!event) {
+                    return;
+                }
+
+                /*
+                 * Each AirCanvas belongs to one participant's camera tile.
+                 * Only render events addressed to this tile.
+                 * Legacy events without targetIdentity are still accepted.
+                 */
+                if (
+                    event.targetIdentity &&
+                    event.targetIdentity !== activeUserIdentity
+                ) {
+                    return;
+                }
+
+                if (
+                    event.type ===
+                    "clear"
+                ) {
+                    historyRef.current.push(
+                        event
+                    );
+
+                    clearLocalCanvas(
+                        false
+                    );
+
+                    return;
+                }
+
+                if (
+                    event.type !==
+                        "line" &&
+                    event.type !==
+                        "dot"
+                ) {
+                    return;
+                }
+
+                addEvent(event);
+
+                const canvas =
+                    canvasRef.current;
+
+                if (!canvas) {
+                    return;
+                }
+
+                const ctx =
+                    canvas.getContext(
+                        "2d"
+                    );
+
+                const video =
+                    processingVideoRef.current;
+
+                if (
+                    event.type ===
+                    "dot"
+                ) {
+                    const point =
+                        getCanvasPoint(
+                            event.point,
+                            canvas,
+                            video,
+                            mirror
+                        );
+
+                    drawDot(
+                        ctx,
+                        point,
+                        event.mode,
+                        event.width
+                    );
+                } else {
+                    const from =
+                        getCanvasPoint(
+                            event.from,
+                            canvas,
+                            video,
+                            mirror
+                        );
+
+                    const to =
+                        getCanvasPoint(
+                            event.to,
+                            canvas,
+                            video,
+                            mirror
+                        );
+
+                    drawLine(
+                        ctx,
+                        from,
+                        to,
+                        event.mode,
+                        event.width
+                    );
+                }
+            } catch (error) {
+                console.error(
+                    "AirCanvas receive error:",
+                    error
+                );
+            }
+        };
+
+        room.on(
+            RoomEvent.DataReceived,
+            handler
+        );
+
+        return () => {
+            room.off(
+                RoomEvent.DataReceived,
+                handler
+            );
+        };
+    }, [
+        room,
+        mirror,
+    ]);
+
+    /*
+     * Attach the controller's existing LiveKit camera
+     * track to an invisible processing video.
+     *
+     * We NEVER create a second camera stream.
+     */
+    useEffect(() => {
+        let stopped =
+            false;
+
+        const attachVideo =
+            () => {
+                if (stopped) return;
+
+                const participant =
+                    activeUserIdentity ===
+                    room.localParticipant.identity
+                        ? room.localParticipant
+                        : room.remoteParticipants.get(
+                              activeUserIdentity
+                          );
+
+                const publication =
+                    participant?.getTrackPublication(
+                        Track.Source.Camera
+                    );
+
+                const track =
+                    publication?.track;
+
+                const video =
+                    processingVideoRef.current;
+
+                if (
+                    !video ||
+                    !track?.mediaStreamTrack
+                ) {
+                    return;
+                }
+
+                const trackId =
+                    track.sid ||
+                    track.mediaStreamTrack.id;
+
+                if (
+                    lastVideoTrackIdRef.current ===
+                    trackId
+                ) {
+                    return;
+                }
+
+                video.srcObject =
+                    new MediaStream([
+                        track.mediaStreamTrack,
+                    ]);
+
+                video.muted =
+                    true;
+
+                video.playsInline =
+                    true;
+
+                video.play().catch(
+                    () => {}
+                );
+
+                lastVideoTrackIdRef.current =
+                    trackId;
+            };
+
+        attachVideo();
+
+        const interval =
+            window.setInterval(
+                attachVideo,
+                400
+            );
+
+        return () => {
+            stopped = true;
+            window.clearInterval(
+                interval
+            );
+        };
+    }, [
+        room,
+        isController,
+        activeUserIdentity,
+    ]);
+
+    /*
+     * Load legacy MediaPipe Hands.
+     * This keeps the tested KNN model and browser pipeline.
+     */
+    useEffect(() => {
+        if (!isController) {
+            return undefined;
+        }
+
+        let cancelled =
+            false;
+
+        const loadScript =
+            (src) =>
+                new Promise(
+                    (
+                        resolve,
+                        reject
+                    ) => {
+                        const existing =
+                            document.querySelector(
+                                `script[src="${src}"]`
+                            );
+
+                        if (
+                            existing
+                        ) {
+                            if (
+                                window.Hands
+                            ) {
+                                resolve();
+                            } else {
+                                existing.addEventListener(
+                                    "load",
+                                    resolve,
+                                    {
+                                        once: true,
+                                    }
+                                );
+
+                                existing.addEventListener(
+                                    "error",
+                                    reject,
+                                    {
+                                        once: true,
+                                    }
+                                );
+                            }
+
+                            return;
+                        }
+
+                        const script =
+                            document.createElement(
+                                "script"
+                            );
+
+                        script.src =
+                            src;
+
+                        script.async =
+                            true;
+
+                        script.onload =
+                            resolve;
+
+                        script.onerror =
+                            reject;
+
+                        document.head.appendChild(
+                            script
+                        );
+                    }
+                );
+
+        const initialize =
+            async () => {
+                try {
+                    await loadScript(
+                        "https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"
+                    );
+
+                    if (
+                        cancelled ||
+                        !window.Hands
+                    ) {
+                        return;
+                    }
+
+                    const hands =
+                        new window.Hands(
+                            {
+                                locateFile:
+                                    (
+                                        file
+                                    ) =>
+                                        `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
+                            }
+                        );
+
+                    hands.setOptions(
+                        {
+                            maxNumHands: 1,
+                            modelComplexity: 1,
+                            minDetectionConfidence: 0.7,
+                            minTrackingConfidence: 0.7,
+                        }
+                    );
+
+                    hands.onResults(
+                        (results) => {
+                            processGesture(
+                                results
+                            );
+                            processingRef.current =
+                                false;
+                        }
+                    );
+
+                    handsRef.current =
+                        hands;
+                } catch (error) {
+                    console.error(
+                        "MediaPipe initialization error:",
+                        error
+                    );
+                }
+            };
+
+        initialize();
+
+        return () => {
+            cancelled = true;
+
+            handsRef.current?.close?.();
+
+            handsRef.current =
+                null;
+        };
+    }, [
+        isController,
+        mirror,
+    ]);
+
+    /*
+     * Run MediaPipe continuously while this participant
+     * owns AirCanvas control.
+     */
+    useEffect(() => {
+        if (!isController) {
+            return undefined;
+        }
+
+        let stopped =
+            false;
+
+        const run =
+            async () => {
+                if (stopped) {
+                    return;
+                }
+
+                const video =
+                    processingVideoRef.current;
+
+                const hands =
+                    handsRef.current;
+
+                if (
+                    video &&
+                    hands &&
+                    !processingRef.current &&
+                    video.readyState >= 2 &&
+                    video.videoWidth > 0
+                ) {
+                    processingRef.current =
+                        true;
+
+                    try {
+                        await hands.send(
+                            {
+                                image:
+                                    video,
+                            }
+                        );
+                    } catch (error) {
+                        processingRef.current =
+                            false;
+
+                        console.error(
+                            "AirCanvas AI frame error:",
+                            error
+                        );
+                    }
+                }
+
+                if (!stopped) {
+                    animationRef.current =
+                        requestAnimationFrame(
+                            run
+                        );
+                }
+            };
+
+        animationRef.current =
+            requestAnimationFrame(
+                run
+            );
+
+        return () => {
+            stopped = true;
+
+            if (
+                animationRef.current
+            ) {
+                cancelAnimationFrame(
+                    animationRef.current
+                );
+            }
+
+            lastPointRef.current =
+                null;
+
+            lastModeRef.current =
+                "NONE";
+
+            candidateModeRef.current =
+                "NONE";
+
+            candidateCountRef.current =
+                0;
+
+            stableModeRef.current =
+                "NONE";
+
+            clearTriggeredRef.current =
+                false;
+
+            processingRef.current =
+                false;
+        };
+    }, [
+        isController,
+    ]);
+
+    /*
+     * Resize the transparent overlay whenever the tile changes.
+     */
+    useEffect(() => {
+        mountedRef.current =
+            true;
+
+        const resize =
+            () => {
+                if (
+                    !mountedRef.current
+                ) {
+                    return;
+                }
+
+                resizeCanvas();
+            };
+
+        resize();
+
+        const observer =
+            new ResizeObserver(
+                resize
+            );
+
+        if (
+            canvasRef.current
+        ) {
+            observer.observe(
+                canvasRef.current
+            );
+        }
+
+        window.addEventListener(
+            "resize",
+            resize
+        );
+
+        return () => {
+            mountedRef.current =
+                false;
+
+            observer.disconnect();
+
+            window.removeEventListener(
+                "resize",
+                resize
+            );
+        };
+    }, []);
+
+    /*
+     * Redraw when the tile/video becomes available.
+     */
+    useEffect(() => {
+        const timer =
+            window.setTimeout(
+                () => {
+                    resizeCanvas();
+                    redrawHistory();
+                },
+                150
+            );
+
+        return () =>
+            window.clearTimeout(
+                timer
+            );
+    }, [
+        activeUserIdentity,
+        mirror,
+    ]);
+
+    return (
+        <>
+            <canvas
+                ref={canvasRef}
+                className="aircanvas-camera-overlay"
+                aria-hidden="true"
+                style={{
+                    position:
+                        "absolute",
+                    inset: 0,
+                    width: "100%",
+                    height: "100%",
+                    zIndex: 25,
+                    pointerEvents:
+                        "none",
+                    display:
+                        "block",
+                }}
+            />
+
+            <video
+                ref={
+                    processingVideoRef
+                }
+                muted
+                playsInline
+                autoPlay
+                aria-hidden="true"
+                style={{
+                    position:
+                        "fixed",
+                    width: "1px",
+                    height: "1px",
+                    left:
+                        "-10000px",
+                    top:
+                        "-10000px",
+                    opacity: 0,
+                    pointerEvents:
+                        "none",
+                }}
+            />
+        </>
+    );
+}
