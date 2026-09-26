@@ -1,203 +1,1004 @@
-import {
-    useEffect,
-    useState,
-} from "react";
+import { useEffect, useRef } from "react";
+import { useRoomContext } from "@livekit/components-react";
+import { RoomEvent, Track } from "livekit-client";
+import knnModel from "./knn_model.json";
 
-import {
-    LiveKitRoom,
-    ParticipantTile,
-    RoomAudioRenderer,
-    Chat,
-    useParticipants,
-    useTracks,
-    useRoomContext,
-} from "@livekit/components-react";
+const TOPIC = "aircanvas-drawing";
+const LABELS = ["DRAW", "ERASE", "CLEAR", "NONE"];
 
-import {
-    Track,
-    RoomEvent,
-} from "livekit-client";
+function featuresFromLandmarks(landmarks, mirrorX = false) {
+    const wrist = landmarks[0];
+    const features = [];
 
-import "@livekit/components-styles";
-import "./App.css";
-import AirCanvas from "./AirCanvas";
+    for (const point of landmarks) {
+        // The trained model is right-hand oriented.  For a left hand,
+        // reflecting X around the wrist converts it into the same canonical
+        // shape without changing the user's actual drawing coordinates.
+        const relativeX = point.x - wrist.x;
+        const canonicalX = mirrorX
+            ? -relativeX
+            : relativeX;
 
-const BACKEND_URL =
-   "https://aircanvas-meet.onrender.com";
-
-const AIR_CANVAS_TOPIC =
-    "aircanvas-control";
-
-/* =========================================================
-   DATA HELPERS
-========================================================= */
-
-function sendAirCanvasMessage(room, message) {
-    try {
-        const data = new TextEncoder().encode(
-            JSON.stringify(message)
-        );
-
-        room.localParticipant.publishData(
-            data,
-            {
-                reliable: true,
-                topic: AIR_CANVAS_TOPIC,
-            }
-        );
-    } catch (error) {
-        console.error(
-            "AirCanvas data error:",
-            error
-        );
+        features.push(canonicalX);
+        features.push(point.y - wrist.y);
+        features.push(point.z - wrist.z);
     }
+
+    return features;
 }
 
-/* =========================================================
-   MEETING ROOM
-========================================================= */
+function predictKNN(features) {
+    let bestDistance = Infinity;
+    let bestLabel = 3;
 
-function MeetingRoom({
-    roomId,
-    connectionStatus,
-    onLeave,
-    isHost,
+    const scaledFeatures = new Array(63);
+
+    for (let j = 0; j < 63; j += 1) {
+        const scale = knnModel.scale[j] || 1;
+        scaledFeatures[j] =
+            (features[j] - knnModel.mean[j]) / scale;
+    }
+
+    for (let i = 0; i < knnModel.trainX.length; i += 1) {
+        const row = knnModel.trainX[i];
+        let distance = 0;
+
+        for (let j = 0; j < 63; j += 1) {
+            const diff = scaledFeatures[j] - row[j];
+            distance += diff * diff;
+
+            if (distance >= bestDistance) {
+                break;
+            }
+        }
+
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            bestLabel = Number(knnModel.trainY[i]);
+        }
+    }
+
+    return {
+        label: LABELS[bestLabel] || "NONE",
+        distance: bestDistance,
+    };
+}
+
+/*
+ * The original training set is right-hand oriented.  We therefore classify
+ * both the detected hand and its X-reflected version and use whichever is
+ * closer to the trained gesture space.  This makes the same four gestures
+ * work naturally for left- and right-handed writers without retraining.
+ */
+function predictHandGesture(landmarks) {
+    const normalFeatures =
+        featuresFromLandmarks(landmarks, false);
+
+    const mirroredFeatures =
+        featuresFromLandmarks(landmarks, true);
+
+    const normalPrediction =
+        predictKNN(normalFeatures);
+
+    const mirroredPrediction =
+        predictKNN(mirroredFeatures);
+
+    if (
+        mirroredPrediction.distance <
+        normalPrediction.distance
+    ) {
+        return mirroredPrediction.label;
+    }
+
+    return normalPrediction.label;
+}
+
+function smoothPoint(previous, current, alpha = 0.58) {
+    if (!previous) return current;
+
+    return {
+        x:
+            previous.x +
+            (current.x - previous.x) * alpha,
+        y:
+            previous.y +
+            (current.y - previous.y) * alpha,
+    };
+}
+
+/*
+ * MediaPipe coordinates are normalized against the actual camera frame.
+ * ParticipantTile normally uses object-fit: cover, so simply multiplying
+ * x/y by the canvas size can be wrong when the aspect ratios differ.
+ *
+ * This function reproduces the object-fit: cover transform so that the
+ * annotation stays on the same visual position as the hand/video.
+ */
+function normalizedToCanvas(
+    point,
+    canvasWidth,
+    canvasHeight,
+    videoWidth,
+    videoHeight,
+    mirrored
+) {
+    if (!point) return null;
+
+    if (
+        !videoWidth ||
+        !videoHeight ||
+        !canvasWidth ||
+        !canvasHeight
+    ) {
+        return {
+            x: point.x * canvasWidth,
+            y: point.y * canvasHeight,
+        };
+    }
+
+    const scale = Math.max(
+        canvasWidth / videoWidth,
+        canvasHeight / videoHeight
+    );
+
+    const renderedWidth =
+        videoWidth * scale;
+
+    const renderedHeight =
+        videoHeight * scale;
+
+    const offsetX =
+        (canvasWidth - renderedWidth) / 2;
+
+    const offsetY =
+        (canvasHeight - renderedHeight) / 2;
+
+    const sourceX = mirrored
+        ? 1 - point.x
+        : point.x;
+
+    return {
+        x:
+            offsetX +
+            sourceX * renderedWidth,
+        y:
+            offsetY +
+            point.y * renderedHeight,
+    };
+}
+
+function getCanvasPoint(
+    point,
+    canvas,
+    video,
+    mirrored
+) {
+    return normalizedToCanvas(
+        point,
+        canvas.clientWidth || canvas.width,
+        canvas.clientHeight || canvas.height,
+        video?.videoWidth || 0,
+        video?.videoHeight || 0,
+        mirrored
+    );
+}
+
+function drawLine(
+    ctx,
+    from,
+    to,
+    mode,
+    width
+) {
+    if (!from || !to) return;
+
+    ctx.save();
+
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = width;
+
+    if (mode === "ERASE") {
+        ctx.globalCompositeOperation =
+            "destination-out";
+    } else {
+        ctx.globalCompositeOperation =
+            "source-over";
+        ctx.strokeStyle = "#00ff66";
+    }
+
+    ctx.beginPath();
+    ctx.moveTo(from.x, from.y);
+    ctx.lineTo(to.x, to.y);
+    ctx.stroke();
+
+    ctx.restore();
+}
+
+function drawDot(
+    ctx,
+    point,
+    mode,
+    width
+) {
+    if (!point) return;
+
+    ctx.save();
+
+    ctx.globalCompositeOperation =
+        mode === "ERASE"
+            ? "destination-out"
+            : "source-over";
+
+    ctx.fillStyle = "#00ff66";
+
+    ctx.beginPath();
+    ctx.arc(
+        point.x,
+        point.y,
+        width / 2,
+        0,
+        Math.PI * 2
+    );
+    ctx.fill();
+
+    ctx.restore();
+}
+
+export default function AirCanvas({
+    activeUserIdentity,
+    tileIdentity,
+    isController = false,
+    mirror = false,
+    showOverlay = true,
 }) {
+    const canvasTileIdentity =
+        tileIdentity || activeUserIdentity;
     const room = useRoomContext();
 
-    const participants =
-        useParticipants();
+    const canvasRef =
+        useRef(null);
 
-    const cameraTracks = useTracks([
-        {
-            source: Track.Source.Camera,
-            withPlaceholder: true,
-        },
-    ]);
+    const processingVideoRef =
+        useRef(null);
 
-    const [activePanel, setActivePanel] =
-        useState(null);
+    const handsRef =
+        useRef(null);
 
-    const [shareCopied, setShareCopied] =
-        useState(false);
+    const animationRef =
+        useRef(null);
 
-    const [micEnabled, setMicEnabled] =
-        useState(true);
+    const lastPointRef =
+        useRef(null);
 
-    const [cameraEnabled, setCameraEnabled] =
-        useState(true);
+    const lastModeRef =
+        useRef("NONE");
 
-    const [screenSharing, setScreenSharing] =
-        useState(false);
+    const candidateModeRef =
+        useRef("NONE");
 
-    const [
-        airCanvasAllowed,
-        setAirCanvasAllowed,
-    ] = useState(false);
+    const candidateCountRef =
+        useRef(0);
 
-    /*
-     * explicitAirCanvasWriter is set ONLY by an explicit grant/revoke/
-     * state-sync message ("aircanvas-granted", "aircanvas-revoked",
-     * "aircanvas-state"). null means "nobody has been explicitly
-     * granted control — default to the host."
-     */
-    const [
-        explicitAirCanvasWriter,
-        setExplicitAirCanvasWriter,
-    ] = useState(null);
+    const stableModeRef =
+        useRef("NONE");
 
-    /*
-     * Find the meeting host from LiveKit participant metadata.
-     * The backend places { isHost: true } in the host token metadata,
-     * so every participant can identify the host.
-     */
-    const hostParticipant =
-        participants.find(
-            (participant) => {
-                try {
-                    const metadata =
-                        JSON.parse(
-                            participant.metadata ||
-                                "{}"
-                        );
+    const clearTriggeredRef =
+        useRef(false);
 
-                    return (
-                        metadata.isHost === true
-                    );
-                } catch {
-                    return false;
+    const historyRef =
+        useRef([]);
+
+    const processingRef =
+        useRef(false);
+
+    const lastVideoTrackIdRef =
+        useRef(null);
+
+    const mountedRef =
+        useRef(true);
+
+    const send = async (
+        message,
+        reliable = false
+    ) => {
+        try {
+            const fullMessage = {
+                ...message,
+                sourceIdentity:
+                    room.localParticipant.identity,
+                targetIdentity:
+                    message.targetIdentity ||
+                    canvasTileIdentity,
+            };
+
+            /* [AC-SEND] Temporary diagnostic log — remove once the
+               drawing-propagation bug is confirmed fixed. */
+            console.log(
+                "[AC-SEND]",
+                fullMessage.event?.type,
+                "from",
+                fullMessage.sourceIdentity,
+                "target",
+                fullMessage.targetIdentity
+            );
+
+            const payload =
+                new TextEncoder().encode(
+                    JSON.stringify(fullMessage)
+                );
+
+            await room.localParticipant.publishData(
+                payload,
+                {
+                    reliable,
+                    topic: TOPIC,
                 }
-            }
-        );
-
-    const hostIdentity =
-        hostParticipant?.identity ||
-        (
-            isHost
-                ? room.localParticipant.identity
-                : null
-        );
-
-    /*
-     * airCanvasUser is DERIVED, computed fresh every render, instead
-     * of being "defaulted" inside a useEffect. This used to be a
-     * useState that a useEffect would set to hostIdentity once
-     * hostIdentity became available. The problem: on a participant's
-     * browser, the LiveKit participant list can take a moment to
-     * populate right after connecting, so hostIdentity could still be
-     * null the one time that effect happened to run — and since
-     * nothing else would ever re-trigger the "default to host" logic
-     * afterward, airCanvasUser got stuck at null FOREVER for that
-     * participant. Every tile's showOverlay check
-     * (tileIdentity === airCanvasUser) is false when airCanvasUser is
-     * null, so that participant's browser would never show ANY
-     * AirCanvas overlay, including the Host's — which is exactly the
-     * "Host draws but nobody else sees the marker" bug.
-     *
-     * Deriving it here instead removes the race entirely: hostIdentity
-     * is computed synchronously above from `participants` on every
-     * render, so airCanvasUser is correct the moment hostIdentity is.
-     */
-    const airCanvasUser =
-        explicitAirCanvasWriter || hostIdentity;
-
-    /*
-     * The host always has AirCanvas permission. This no longer needs
-     * to touch airCanvasUser at all now that it's derived above.
-     */
-    useEffect(() => {
-        if (isHost) {
-            setAirCanvasAllowed(true);
+            );
+        } catch (error) {
+            console.error(
+                "AirCanvas data error:",
+                error
+            );
         }
-    }, [isHost]);
+    };
 
-    const [
-        pendingRequest,
-        setPendingRequest,
-    ] = useState(null);
+    const resizeCanvas = () => {
+        const canvas =
+            canvasRef.current;
 
-    /* =====================================================
-       PARTICIPANT NAME
-    ===================================================== */
+        if (!canvas) return;
 
-    const localName =
-        room.localParticipant.name ||
-        "Participant";
+        const rect =
+            canvas.getBoundingClientRect();
 
-    /* =====================================================
-       AIR CANVAS DATA EVENTS
-    ===================================================== */
+        const dpr =
+            window.devicePixelRatio || 1;
 
+        const width =
+            Math.max(
+                1,
+                Math.round(
+                    rect.width * dpr
+                )
+            );
+
+        const height =
+            Math.max(
+                1,
+                Math.round(
+                    rect.height * dpr
+                )
+            );
+
+        if (
+            canvas.width === width &&
+            canvas.height === height
+        ) {
+            return;
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+
+        const ctx =
+            canvas.getContext("2d");
+
+        ctx.setTransform(
+            dpr,
+            0,
+            0,
+            dpr,
+            0,
+            0
+        );
+
+        redrawHistory();
+    };
+
+    /*
+     * On mount, ask the owner of this tile for whatever they have
+     * already drawn (see the "history-request" / "history-dump"
+     * handling in the DataReceived effect below). We never need to
+     * request our OWN tile's history — nobody but us could have
+     * drawn on it, so there is nothing anyone else could send back.
+     */
     useEffect(() => {
-        const handleData = (
+        /*
+         * Guard against the mount-time race where this effect can run
+         * before canvasTileIdentity (derived from hostIdentity /
+         * LiveKit participant metadata) has resolved yet. Without this
+         * guard we'd fire a history-request with targetIdentity: null,
+         * which nobody can ever answer — a wasted, silently-dropped
+         * packet. Because the effect's dependency array is
+         * [canvasTileIdentity], simply bailing out here is enough: the
+         * effect automatically re-runs and sends the CORRECT request
+         * the moment canvasTileIdentity resolves to a real identity.
+         */
+        if (!canvasTileIdentity) {
+            return;
+        }
+
+        if (
+            canvasTileIdentity ===
+            room.localParticipant.identity
+        ) {
+            return;
+        }
+
+        send(
+            {
+                type: "canvas-event",
+                event: {
+                    type: "history-request",
+                    targetIdentity: canvasTileIdentity,
+                },
+            },
+            true
+        );
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [canvasTileIdentity]);
+
+    const redrawHistory = () => {
+        const canvas =
+            canvasRef.current;
+
+        if (!canvas) return;
+
+        const ctx =
+            canvas.getContext("2d");
+
+        const cssWidth =
+            canvas.clientWidth;
+
+        const cssHeight =
+            canvas.clientHeight;
+
+        ctx.clearRect(
+            0,
+            0,
+            cssWidth,
+            cssHeight
+        );
+
+        const video =
+            processingVideoRef.current;
+
+        for (
+            const event of historyRef.current
+        ) {
+            if (
+                event.type ===
+                "clear"
+            ) {
+                ctx.clearRect(
+                    0,
+                    0,
+                    cssWidth,
+                    cssHeight
+                );
+                continue;
+            }
+
+            if (
+                event.type ===
+                "dot"
+            ) {
+                const point =
+                    getCanvasPoint(
+                        event.point,
+                        canvas,
+                        video,
+                        false
+                    );
+
+                drawDot(
+                    ctx,
+                    point,
+                    event.mode,
+                    event.width
+                );
+
+                continue;
+            }
+
+            if (
+                event.type ===
+                "line"
+            ) {
+                const from =
+                    getCanvasPoint(
+                        event.from,
+                        canvas,
+                        video,
+                        false
+                    );
+
+                const to =
+                    getCanvasPoint(
+                        event.to,
+                        canvas,
+                        video,
+                        false
+                    );
+
+                drawLine(
+                    ctx,
+                    from,
+                    to,
+                    event.mode,
+                    event.width
+                );
+            }
+        }
+    };
+
+    const addEvent = (
+        event
+    ) => {
+        historyRef.current.push(
+            event
+        );
+
+        if (
+            historyRef.current.length >
+            12000
+        ) {
+            historyRef.current.splice(
+                0,
+                2000
+            );
+        }
+    };
+
+    const clearLocalCanvas = (
+        record = true
+    ) => {
+        const canvas =
+            canvasRef.current;
+
+        if (!canvas) return;
+
+        const ctx =
+            canvas.getContext("2d");
+
+        ctx.clearRect(
+            0,
+            0,
+            canvas.clientWidth,
+            canvas.clientHeight
+        );
+
+        if (record) {
+            addEvent({
+                type: "clear",
+            });
+        }
+
+        lastPointRef.current =
+            null;
+
+        lastModeRef.current =
+            "NONE";
+
+        candidateModeRef.current =
+            "NONE";
+
+        candidateCountRef.current =
+            0;
+
+        stableModeRef.current =
+            "NONE";
+    };
+
+    const processGesture =
+        (results) => {
+            if (!isController) {
+                return;
+            }
+
+            const canvas =
+                canvasRef.current;
+
+            const video =
+                processingVideoRef.current;
+
+            if (
+                !canvas ||
+                !video
+            ) {
+                return;
+            }
+
+            if (
+                !results
+                    ?.multiHandLandmarks
+                    ?.length
+            ) {
+                lastPointRef.current =
+                    null;
+
+                lastModeRef.current =
+                    "NONE";
+
+                candidateModeRef.current =
+                    "NONE";
+
+                candidateCountRef.current =
+                    0;
+
+                stableModeRef.current =
+                    "NONE";
+
+                clearTriggeredRef.current =
+                    false;
+
+                return;
+            }
+
+            const landmarks =
+                results
+                    .multiHandLandmarks[0];
+
+            if (
+                !landmarks ||
+                landmarks.length <
+                    21
+            ) {
+                lastPointRef.current =
+                    null;
+
+                lastModeRef.current =
+                    "NONE";
+
+                candidateModeRef.current =
+                    "NONE";
+
+                candidateCountRef.current =
+                    0;
+
+                stableModeRef.current =
+                    "NONE";
+
+                clearTriggeredRef.current =
+                    false;
+
+                return;
+            }
+
+            const detectedGesture =
+                predictHandGesture(
+                    landmarks
+                );
+
+            /*
+             * Stabilize the gesture before drawing.  CLEAR gets a slightly
+             * shorter confirmation because a closed fist is intentionally a
+             * discrete command.  DRAW and ERASE need a few frames so brief
+             * MediaPipe pose changes do not break the stroke.
+             */
+            if (
+                detectedGesture ===
+                candidateModeRef.current
+            ) {
+                candidateCountRef.current += 1;
+            } else {
+                candidateModeRef.current =
+                    detectedGesture;
+                candidateCountRef.current =
+                    1;
+            }
+
+            const confirmFrames =
+                detectedGesture ===
+                "CLEAR"
+                    ? 2
+                    : 3;
+
+            if (
+                candidateCountRef.current >=
+                confirmFrames
+            ) {
+                stableModeRef.current =
+                    detectedGesture;
+            }
+
+            const gesture =
+                stableModeRef.current;
+
+            if (gesture === "CLEAR") {
+                lastPointRef.current =
+                    null;
+
+                lastModeRef.current =
+                    "CLEAR";
+
+                if (!clearTriggeredRef.current) {
+                    clearTriggeredRef.current =
+                        true;
+
+                    clearLocalCanvas(
+                        true
+                    );
+
+                    clearTriggeredRef.current =
+                        true;
+
+                    send(
+                        {
+                            type:
+                                "canvas-event",
+                            event: {
+                                type:
+                                    "clear",
+                                targetIdentity:
+                                    canvasTileIdentity,
+                            },
+                        },
+                        true
+                    );
+                }
+
+                return;
+            }
+
+            if (gesture !== "CLEAR") {
+                clearTriggeredRef.current =
+                    false;
+            }
+
+            if (
+                gesture !== "DRAW" &&
+                gesture !== "ERASE"
+            ) {
+                lastPointRef.current =
+                    null;
+
+                lastModeRef.current =
+                    "NONE";
+
+                return;
+            }
+
+            const rawPoint = {
+                x: Math.max(
+                    0,
+                    Math.min(
+                        1,
+                        landmarks[8].x
+                    )
+                ),
+                y: Math.max(
+                    0,
+                    Math.min(
+                        1,
+                        landmarks[8].y
+                    )
+                ),
+            };
+
+            /*
+             * MIRROR-WRITING CORRECTION.
+             *
+             * MediaPipe reads the RAW, unmirrored camera feed (the
+             * hidden processing <video>, not the visible mirrored
+             * tile). But the writer is watching their OWN mirrored
+             * self-view while drawing, so they naturally move their
+             * real hand in the left-right mirror image of whatever
+             * they intend to write — the same reason people write
+             * backwards on a foggy mirror or a piece of glass. That
+             * means rawPoint.x, exactly as MediaPipe reports it, is
+             * already the mirror image of the intended shape.
+             *
+             * We flip x ONCE here, at the moment of capture, so that
+             * `canonicalPoint` is the correctly-oriented, legible
+             * coordinate. This is now the ONLY point value that ever
+             * goes into smoothing, history, and the network payload
+             * (event.point / event.from / event.to).
+             *
+             * Because the flip already happened here, NOTHING further
+             * down the pipeline — local drawing, remote drawing, or
+             * history replay — should apply any additional mirroring.
+             * Every getCanvasPoint(...) call below now passes `false`
+             * for that reason: the coordinate is already correct for
+             * everyone, writer included.
+             */
+            const canonicalPoint = {
+                x: 1 - rawPoint.x,
+                y: rawPoint.y,
+            };
+
+            /* [AC-POINT] Temporary diagnostic log — remove once the
+               mirror-writing fix is confirmed on a verified-fresh
+               deploy. Throttled to ~once/sec per browser tab so it
+               doesn't flood the console during continuous drawing. */
+            if (
+                !processGesture._lastLog ||
+                Date.now() - processGesture._lastLog > 1000
+            ) {
+                processGesture._lastLog = Date.now();
+                console.log(
+                    "[AC-POINT]",
+                    "who-drew",
+                    room.localParticipant.identity,
+                    "onTile",
+                    canvasTileIdentity,
+                    "rawX",
+                    rawPoint.x.toFixed(3),
+                    "canonicalX",
+                    canonicalPoint.x.toFixed(3)
+                );
+            }
+
+            const point =
+                smoothPoint(
+                    lastPointRef.current,
+                    canonicalPoint
+                );
+
+            const width =
+                gesture === "ERASE"
+                    ? 68
+                    : 4;
+
+            const ctx =
+                canvas.getContext(
+                    "2d"
+                );
+
+            const canvasPoint =
+                getCanvasPoint(
+                    point,
+                    canvas,
+                    video,
+                    false
+                );
+
+            if (
+                lastModeRef.current !==
+                    gesture ||
+                !lastPointRef.current
+            ) {
+                lastPointRef.current =
+                    point;
+
+                lastModeRef.current =
+                    gesture;
+
+                drawDot(
+                    ctx,
+                    canvasPoint,
+                    gesture,
+                    width
+                );
+
+                const event = {
+                    type: "dot",
+                    mode: gesture,
+                    point,
+                    width,
+                    targetIdentity: canvasTileIdentity,
+                };
+
+                addEvent(event);
+
+                send(
+                    {
+                        type:
+                            "canvas-event",
+                        event,
+                    },
+                    false
+                );
+
+                return;
+            }
+
+            const distance =
+                Math.hypot(
+                    point.x -
+                        lastPointRef.current
+                            .x,
+                    point.y -
+                        lastPointRef.current
+                            .y
+                );
+
+            /*
+             * A very large jump means the hand tracking
+             * temporarily lost the finger. Start again
+             * instead of drawing a diagonal across the board.
+             */
+            if (
+                distance >
+                0.12
+            ) {
+                lastPointRef.current =
+                    point;
+
+                return;
+            }
+
+            const event = {
+                type: "line",
+                mode: gesture,
+                from:
+                    lastPointRef.current,
+                to: point,
+                width,
+                targetIdentity: canvasTileIdentity,
+            };
+
+            const from =
+                getCanvasPoint(
+                    event.from,
+                    canvas,
+                    video,
+                    false
+                );
+
+            const to =
+                getCanvasPoint(
+                    event.to,
+                    canvas,
+                    video,
+                    false
+                );
+
+            drawLine(
+                ctx,
+                from,
+                to,
+                gesture,
+                width
+            );
+
+            addEvent(event);
+
+            send(
+                {
+                    type:
+                        "canvas-event",
+                    event,
+                },
+                false
+            );
+
+            lastPointRef.current =
+                point;
+        };
+
+    /*
+     * Receive drawing events from every participant.
+     * Every client renders the same normalized coordinates
+     * over the active participant's video tile.
+     */
+    useEffect(() => {
+        const handler = (
             payload,
-            participant,
-            kind,
+            sourceParticipant,
+            _kind,
             topic
         ) => {
+            /* [AC-RECV] Temporary diagnostic log — remove once the
+               drawing-propagation bug is confirmed fixed. Fires for
+               EVERY DataReceived event on this room, regardless of
+               topic, so we can tell whether the packet is arriving
+               on this browser at all. */
+            console.log(
+                "[AC-RECV] raw",
+                {
+                    topic,
+                    from: sourceParticipant?.identity,
+                    myTile: canvasTileIdentity,
+                    showing:
+                        canvasRef.current
+                            ?.style.display,
+                }
+            );
+
             if (
-                topic &&
-                topic !== AIR_CANVAS_TOPIC
+                topic !== TOPIC
             ) {
                 return;
             }
@@ -210,158 +1011,232 @@ function MeetingRoom({
                         )
                     );
 
-                /* =========================================
-                   AIR CANVAS STATE REQUEST
-                ========================================= */
-
                 if (
-                    message.type ===
-                    "aircanvas-state-request"
+                    message.type !==
+                    "canvas-event"
                 ) {
-                    if (!isHost) {
-                        return;
-                    }
-
-                    sendAirCanvasMessage(
-                        room,
-                        {
-                            type:
-                                "aircanvas-state",
-                            identity:
-                                airCanvasUser ||
-                                room.localParticipant
-                                    .identity,
-                        }
-                    );
-
                     return;
                 }
 
-                /* =========================================
-                   AIR CANVAS STATE
-                ========================================= */
+                const event =
+                    message.event;
 
-                if (
-                    message.type ===
-                    "aircanvas-state"
-                ) {
-                    const controllerIdentity =
-                        message.identity ||
-                        hostIdentity;
-
-                    if (controllerIdentity) {
-                        setExplicitAirCanvasWriter(
-                            controllerIdentity
-                        );
-
-                        setAirCanvasAllowed(
-                            isHost ||
-                            controllerIdentity ===
-                                room.localParticipant
-                                    .identity
-                        );
-                    }
-
+                if (!event) {
                     return;
                 }
 
-                /* =========================================
-                   PARTICIPANT REQUESTS ACCESS
-                ========================================= */
+                /* [AC-RECV] Temporary diagnostic log — remove once
+                   the drawing-propagation bug is confirmed fixed. */
+                console.log(
+                    "[AC-RECV] parsed",
+                    event.type,
+                    "src",
+                    message.sourceIdentity,
+                    "eventTarget",
+                    event.targetIdentity,
+                    "myTile",
+                    canvasTileIdentity
+                );
 
-                if (
-                    message.type ===
-                    "aircanvas-request"
-                ) {
-                    if (!isHost) {
-                        return;
-                    }
-
-                    setPendingRequest({
-                        identity:
-                            message.identity,
-                        name:
-                            message.name ||
-                            "Participant",
-                    });
-
-                    return;
-                }
-
-                /* =========================================
-                   HOST ALLOWS PARTICIPANT
-                ========================================= */
-
-                if (
-                    message.type ===
-                    "aircanvas-granted"
-                ) {
-                    /*
-                     * Every participant updates the active AirCanvas
-                     * identity. This makes the same canvas appear on
-                     * the same camera tile on laptops and phones.
-                     */
-                    setExplicitAirCanvasWriter(
-                        message.identity
-                    );
-
-                    setAirCanvasAllowed(
-                        isHost ||
-                        message.identity ===
-                            room.localParticipant
-                                .identity
-                    );
-
-                    return;
-                }
-
-                /* =========================================
-                   HOST REVOKES ACCESS
-                ========================================= */
-
-                if (
-                    message.type ===
-                    "aircanvas-revoked"
-                ) {
-                    /*
-                     * Return AirCanvas control to the host for everyone.
-                     * null means "no explicit writer" — airCanvasUser
-                     * derives back to hostIdentity automatically.
-                     */
-                    setExplicitAirCanvasWriter(
-                        null
-                    );
-
-                    setAirCanvasAllowed(
-                        isHost
-                    );
-
-                    return;
-                }
-
-                /* =========================================
-                   HOST DENIES REQUEST
-                ========================================= */
-
-                if (
-                    message.type ===
-                    "aircanvas-denied"
-                ) {
+                /*
+                 * CANVAS HISTORY SYNC
+                 *
+                 * A participant whose AirCanvas instance just mounted
+                 * (they joined mid-meeting, or a tile just appeared)
+                 * starts with an empty historyRef. Without this, they
+                 * see nothing already drawn on that tile until its
+                 * owner draws something NEW — the "host draws, but a
+                 * participant who joined late sees nothing" bug.
+                 *
+                 * Only the participant whose OWN identity equals a
+                 * tile's identity can ever have authoritative history
+                 * for that tile (that is the only client that has ever
+                 * been allowed to draw on it), so a viewer asks that
+                 * owner directly and the owner replies with a one-time
+                 * full dump, independent of who currently holds AirCanvas
+                 * write permission.
+                 */
+                if (event.type === "history-request") {
                     if (
-                        message.identity ===
-                        room.localParticipant
-                            .identity
+                        message.sourceIdentity ===
+                        room.localParticipant.identity
                     ) {
-                        setAirCanvasAllowed(
+                        // Our own request, echoed back to us. Ignore it.
+                        return;
+                    }
+
+                    if (
+                        event.targetIdentity ===
+                            canvasTileIdentity &&
+                        canvasTileIdentity ===
+                            room.localParticipant.identity
+                    ) {
+                        send(
+                            {
+                                type: "canvas-event",
+                                event: {
+                                    type: "history-dump",
+                                    history:
+                                        historyRef.current,
+                                },
+                                targetIdentity:
+                                    message.sourceIdentity,
+                            },
+                            true
+                        );
+                    }
+
+                    return;
+                }
+
+                if (event.type === "history-dump") {
+                    if (
+                        message.targetIdentity ===
+                            room.localParticipant.identity &&
+                        message.sourceIdentity ===
+                            canvasTileIdentity
+                    ) {
+                        historyRef.current =
+                            Array.isArray(event.history)
+                                ? event.history
+                                : [];
+
+                        redrawHistory();
+                    }
+
+                    return;
+                }
+
+                /*
+                 * Each AirCanvas belongs to exactly one participant tile.
+                 * Route a drawing by the identity of the participant who
+                 * produced it. This prevents one person's stroke from being
+                 * rendered on every tile. targetIdentity is retained only as
+                 * a compatibility guard for older packets.
+                 */
+                const sourceIdentity =
+                    event.sourceIdentity ||
+                    message.sourceIdentity ||
+                    sourceParticipant?.identity;
+
+                if (
+                    sourceIdentity &&
+                    sourceIdentity !== canvasTileIdentity
+                ) {
+                    return;
+                }
+
+                if (
+                    event.targetIdentity &&
+                    event.targetIdentity !== canvasTileIdentity
+                ) {
+                    return;
+                }
+
+                const routedEvent = {
+                    ...event,
+                    sourceIdentity,
+                };
+
+                /*
+                 * The controller already draws its own event locally.
+                 * Ignore the echoed packet from LiveKit on that same
+                 * browser so the local stroke is not duplicated.
+                 */
+                if (
+                    sourceParticipant?.identity ===
+                    room.localParticipant.identity
+                ) {
+                    return;
+                }
+
+                if (
+                    event.type ===
+                    "clear"
+                ) {
+                    historyRef.current.push(
+                        routedEvent
+                    );
+
+                    clearLocalCanvas(
+                        false
+                    );
+
+                    return;
+                }
+
+                if (
+                    event.type !==
+                        "line" &&
+                    event.type !==
+                        "dot"
+                ) {
+                    return;
+                }
+
+                addEvent(routedEvent);
+
+                const canvas =
+                    canvasRef.current;
+
+                if (!canvas) {
+                    return;
+                }
+
+                const ctx =
+                    canvas.getContext(
+                        "2d"
+                    );
+
+                const video =
+                    processingVideoRef.current;
+
+                if (
+                    event.type ===
+                    "dot"
+                ) {
+                    const point =
+                        getCanvasPoint(
+                            routedEvent.point,
+                            canvas,
+                            video,
                             false
                         );
-                    }
 
-                    return;
+                    drawDot(
+                        ctx,
+                        point,
+                        routedEvent.mode,
+                        routedEvent.width
+                    );
+                } else {
+                    const from =
+                        getCanvasPoint(
+                            routedEvent.from,
+                            canvas,
+                            video,
+                            false
+                        );
+
+                    const to =
+                        getCanvasPoint(
+                            routedEvent.to,
+                            canvas,
+                            video,
+                            false
+                        );
+
+                    drawLine(
+                        ctx,
+                        from,
+                        to,
+                        routedEvent.mode,
+                        routedEvent.width
+                    );
                 }
             } catch (error) {
                 console.error(
-                    "AirCanvas message error:",
+                    "AirCanvas receive error:",
                     error
                 );
             }
@@ -369,1944 +1244,484 @@ function MeetingRoom({
 
         room.on(
             RoomEvent.DataReceived,
-            handleData
+            handler
         );
 
         return () => {
             room.off(
                 RoomEvent.DataReceived,
-                handleData
+                handler
             );
         };
     }, [
         room,
-        isHost,
-        hostIdentity,
-        airCanvasUser,
+        activeUserIdentity,
+        mirror,
     ]);
 
-    /* =====================================================
-       SYNC AIR CANVAS STATE FOR NEW PARTICIPANTS
-    ===================================================== */
-
+    /*
+     * Attach the controller's existing LiveKit camera
+     * track to an invisible processing video.
+     *
+     * We NEVER create a second camera stream.
+     */
     useEffect(() => {
-        const timer =
-            window.setTimeout(() => {
-                sendAirCanvasMessage(
-                    room,
-                    {
-                        type:
-                            "aircanvas-state-request",
-                    }
-                );
-            }, 500);
+        let stopped =
+            false;
 
-        return () =>
-            window.clearTimeout(timer);
-    }, [room]);
+        const attachVideo =
+            () => {
+                if (stopped) return;
 
-    /* =====================================================
-       MICROPHONE
-    ===================================================== */
+                const participant =
+                    canvasTileIdentity ===
+                    room.localParticipant.identity
+                        ? room.localParticipant
+                        : room.remoteParticipants.get(
+                              canvasTileIdentity
+                          );
 
-    const toggleMicrophone =
-        async () => {
-            try {
-                const enabled =
-                    !room.localParticipant
-                        .isMicrophoneEnabled;
-
-                await room.localParticipant
-                    .setMicrophoneEnabled(
-                        enabled
+                const publication =
+                    participant?.getTrackPublication(
+                        Track.Source.Camera
                     );
 
-                setMicEnabled(
-                    enabled
-                );
-            } catch (error) {
-                console.error(
-                    "Microphone toggle error:",
-                    error
-                );
-            }
-        };
+                const track =
+                    publication?.track;
 
-    /* =====================================================
-       CAMERA
-    ===================================================== */
-
-    const toggleCamera =
-        async () => {
-            try {
-                const enabled =
-                    !room.localParticipant
-                        .isCameraEnabled;
-
-                await room.localParticipant
-                    .setCameraEnabled(
-                        enabled
-                    );
-
-                setCameraEnabled(
-                    enabled
-                );
-            } catch (error) {
-                console.error(
-                    "Camera toggle error:",
-                    error
-                );
-            }
-        };
-
-    /* =====================================================
-       SCREEN SHARE
-    ===================================================== */
-
-    const toggleScreenShare =
-        async () => {
-            try {
-                const enabled =
-                    !screenSharing;
-
-                await room.localParticipant
-                    .setScreenShareEnabled(
-                        enabled
-                    );
-
-                setScreenSharing(
-                    enabled
-                );
-            } catch (error) {
-                console.error(
-                    "Screen share error:",
-                    error
-                );
-            }
-        };
-
-    /* =====================================================
-       REQUEST AIR CANVAS
-    ===================================================== */
-
-    const requestAirCanvas =
-        () => {
-            sendAirCanvasMessage(
-                room,
-                {
-                    type:
-                        "aircanvas-request",
-                    identity:
-                        room.localParticipant
-                            .identity,
-                    name: localName,
-                }
-            );
-
-            setPendingRequest({
-                waiting: true,
-            });
-        };
-
-    /* =====================================================
-       ALLOW AIR CANVAS
-    ===================================================== */
-
-    const allowAirCanvas =
-        (identity) => {
-            if (!isHost) {
-                return;
-            }
-
-            sendAirCanvasMessage(
-                room,
-                {
-                    type:
-                        "aircanvas-granted",
-                    identity,
-                }
-            );
-
-            /*
-             * Every client will receive the grant message and update
-             * airCanvasUser. The host remains the permission controller,
-             * while the selected participant becomes the controller.
-             */
-            setExplicitAirCanvasWriter(
-                identity
-            );
-
-            setAirCanvasAllowed(
-                isHost
-            );
-
-            setPendingRequest(
-                null
-            );
-        };
-
-    /* =====================================================
-       DENY AIR CANVAS
-    ===================================================== */
-
-    const denyAirCanvas =
-        (identity) => {
-            if (!isHost) {
-                return;
-            }
-
-            sendAirCanvasMessage(
-                room,
-                {
-                    type:
-                        "aircanvas-denied",
-                    identity,
-                }
-            );
-
-            setPendingRequest(
-                null
-            );
-        };
-
-    /* =====================================================
-       REVOKE AIR CANVAS
-    ===================================================== */
-
-    const revokeAirCanvas =
-        (identity) => {
-            if (!isHost) {
-                return;
-            }
-
-            sendAirCanvasMessage(
-                room,
-                {
-                    type:
-                        "aircanvas-revoked",
-                    identity,
-                }
-            );
-
-            /*
-             * All clients return the visible AirCanvas to the host.
-             * The revoked participant loses controller permission.
-             * null means "no explicit writer" — airCanvasUser derives
-             * back to hostIdentity automatically.
-             */
-            setExplicitAirCanvasWriter(
-                null
-            );
-
-            setAirCanvasAllowed(
-                isHost
-            );
-        };
-
-    /* =====================================================
-       AIR CANVAS BUTTON
-    ===================================================== */
-
-    const handleAirCanvas =
-        () => {
-            if (isHost) {
-                setActivePanel(
-                    "aircanvas"
-                );
-
-                return;
-            }
-
-            if (airCanvasAllowed) {
-                setActivePanel(
-                    "aircanvas"
-                );
-
-                return;
-            }
-
-            if (
-                pendingRequest?.waiting
-            ) {
-                return;
-            }
-
-            requestAirCanvas();
-        };
-
-    /* =====================================================
-       LEAVE
-    ===================================================== */
-
-    const handleLeave =
-        async () => {
-            try {
-                await room.disconnect();
-            } catch (error) {
-                console.error(
-                    "Disconnect error:",
-                    error
-                );
-            } finally {
-                onLeave();
-            }
-        };
-
-    /* =====================================================
-       SHARE CURRENT MEETING
-    ===================================================== */
-
-    const handleShareMeeting =
-        async () => {
-            try {
-                /*
-                 * Always build the clean public meeting URL from
-                 * the current origin and room ID.
-                 *
-                 * The host token is intentionally excluded.
-                 */
-                const meetingLink =
-                    `${window.location.origin}/meeting/${roomId}`;
+                const video =
+                    processingVideoRef.current;
 
                 if (
-                    navigator.clipboard &&
-                    window.isSecureContext
+                    !video ||
+                    !track?.mediaStreamTrack
                 ) {
-                    await navigator.clipboard.writeText(
-                        meetingLink
-                    );
-                } else {
-                    const textArea =
-                        document.createElement("textarea");
-
-                    textArea.value =
-                        meetingLink;
-
-                    textArea.style.position =
-                        "fixed";
-                    textArea.style.opacity =
-                        "0";
-
-                    document.body.appendChild(
-                        textArea
-                    );
-
-                    textArea.focus();
-                    textArea.select();
-
-                    document.execCommand(
-                        "copy"
-                    );
-
-                    document.body.removeChild(
-                        textArea
-                    );
+                    return;
                 }
 
-                setShareCopied(true);
+                const trackId =
+                    track.sid ||
+                    track.mediaStreamTrack.id;
 
-                setTimeout(() => {
-                    setShareCopied(false);
-                }, 2000);
-            } catch (error) {
-                console.error(
-                    "Share meeting error:",
-                    error
+                if (
+                    lastVideoTrackIdRef.current ===
+                    trackId
+                ) {
+                    return;
+                }
+
+                video.srcObject =
+                    new MediaStream([
+                        track.mediaStreamTrack,
+                    ]);
+
+                video.muted =
+                    true;
+
+                video.playsInline =
+                    true;
+
+                video.play().catch(
+                    () => {}
                 );
 
-                setError(
-                    "Unable to copy the meeting link. Please copy the URL from the browser."
+                lastVideoTrackIdRef.current =
+                    trackId;
+            };
+
+        lastVideoTrackIdRef.current = null;
+
+        if (processingVideoRef.current) {
+            processingVideoRef.current.srcObject = null;
+        }
+
+        attachVideo();
+
+        const interval =
+            window.setInterval(
+                attachVideo,
+                400
+            );
+
+        return () => {
+            stopped = true;
+            window.clearInterval(
+                interval
+            );
+
+            if (processingVideoRef.current) {
+                processingVideoRef.current.pause?.();
+                processingVideoRef.current.srcObject = null;
+            }
+
+            lastVideoTrackIdRef.current = null;
+        };
+    }, [
+        room,
+        canvasTileIdentity,
+    ]);
+
+    /*
+     * Load legacy MediaPipe Hands.
+     * This keeps the tested KNN model and browser pipeline.
+     */
+    useEffect(() => {
+        if (!isController) {
+            return undefined;
+        }
+
+        let cancelled =
+            false;
+
+        const loadScript =
+            (src) =>
+                new Promise(
+                    (
+                        resolve,
+                        reject
+                    ) => {
+                        const existing =
+                            document.querySelector(
+                                `script[src="${src}"]`
+                            );
+
+                        if (
+                            existing
+                        ) {
+                            if (
+                                window.Hands
+                            ) {
+                                resolve();
+                            } else {
+                                existing.addEventListener(
+                                    "load",
+                                    resolve,
+                                    {
+                                        once: true,
+                                    }
+                                );
+
+                                existing.addEventListener(
+                                    "error",
+                                    reject,
+                                    {
+                                        once: true,
+                                    }
+                                );
+                            }
+
+                            return;
+                        }
+
+                        const script =
+                            document.createElement(
+                                "script"
+                            );
+
+                        script.src =
+                            src;
+
+                        script.async =
+                            true;
+
+                        script.onload =
+                            resolve;
+
+                        script.onerror =
+                            reject;
+
+                        document.head.appendChild(
+                            script
+                        );
+                    }
+                );
+
+        const initialize =
+            async () => {
+                try {
+                    await loadScript(
+                        "https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"
+                    );
+
+                    if (
+                        cancelled ||
+                        !window.Hands
+                    ) {
+                        return;
+                    }
+
+                    const hands =
+                        new window.Hands(
+                            {
+                                locateFile:
+                                    (
+                                        file
+                                    ) =>
+                                        `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
+                            }
+                        );
+
+                    hands.setOptions(
+                        {
+                            maxNumHands: 1,
+                            modelComplexity: 1,
+                            minDetectionConfidence: 0.7,
+                            minTrackingConfidence: 0.7,
+                        }
+                    );
+
+                    hands.onResults(
+                        (results) => {
+                            processGesture(
+                                results
+                            );
+                            processingRef.current =
+                                false;
+                        }
+                    );
+
+                    handsRef.current =
+                        hands;
+                } catch (error) {
+                    console.error(
+                        "MediaPipe initialization error:",
+                        error
+                    );
+                }
+            };
+
+        initialize();
+
+        return () => {
+            cancelled = true;
+
+            handsRef.current?.close?.();
+
+            handsRef.current =
+                null;
+        };
+    }, [
+        isController,
+        mirror,
+    ]);
+
+    /*
+     * Run MediaPipe continuously while this participant
+     * owns AirCanvas control.
+     */
+    useEffect(() => {
+        if (!isController) {
+            return undefined;
+        }
+
+        let stopped =
+            false;
+
+        const run =
+            async () => {
+                if (stopped) {
+                    return;
+                }
+
+                const video =
+                    processingVideoRef.current;
+
+                const hands =
+                    handsRef.current;
+
+                if (
+                    video &&
+                    hands &&
+                    !processingRef.current &&
+                    video.readyState >= 2 &&
+                    video.videoWidth > 0
+                ) {
+                    processingRef.current =
+                        true;
+
+                    try {
+                        await hands.send(
+                            {
+                                image:
+                                    video,
+                            }
+                        );
+                    } catch (error) {
+                        processingRef.current =
+                            false;
+
+                        console.error(
+                            "AirCanvas AI frame error:",
+                            error
+                        );
+                    }
+                }
+
+                if (!stopped) {
+                    animationRef.current =
+                        requestAnimationFrame(
+                            run
+                        );
+                }
+            };
+
+        animationRef.current =
+            requestAnimationFrame(
+                run
+            );
+
+        return () => {
+            stopped = true;
+
+            if (
+                animationRef.current
+            ) {
+                cancelAnimationFrame(
+                    animationRef.current
                 );
             }
+
+            lastPointRef.current =
+                null;
+
+            lastModeRef.current =
+                "NONE";
+
+            candidateModeRef.current =
+                "NONE";
+
+            candidateCountRef.current =
+                0;
+
+            stableModeRef.current =
+                "NONE";
+
+            clearTriggeredRef.current =
+                false;
+
+            processingRef.current =
+                false;
         };
-
-    /* =====================================================
-       PANEL
-    ===================================================== */
-
-    const togglePanel =
-        (panel) => {
-            setActivePanel(
-                (current) =>
-                    current === panel
-                        ? null
-                        : panel
-            );
-        };
-
-    /* =====================================================
-       RENDER
-    ===================================================== */
-
-    return (
-        <div className="meeting-room">
-
-            {/* HEADER */}
-
-            <header className="meeting-header">
-
-                <div className="brand-section">
-
-                    <div className="brand-icon">
-                        ✋
-                    </div>
-
-                    <div>
-                        <h1>
-                            AirCanvas Meet
-                        </h1>
-
-                        <span>
-                            Online Classroom
-                        </span>
-                    </div>
-
-                </div>
-
-                <div className="meeting-header-center">
-
-                    <div className="connection-pill">
-                        <span className="connection-dot" />
-                        {connectionStatus}
-                    </div>
-
-                </div>
-
-                <div className="meeting-header-right">
-
-                    <button
-                        className="header-action"
-                        onClick={
-                            handleShareMeeting
-                        }
-                        title={
-                            shareCopied
-                                ? "Meeting link copied"
-                                : "Copy current meeting link"
-                        }
-                    >
-                        🔗
-                        <span>
-                            {shareCopied
-                                ? "Copied!"
-                                : "Share"}
-                        </span>
-                    </button>
-
-                    <div className="meeting-id-display">
-                        Meeting ID
-                        <strong>
-                            {roomId}
-                        </strong>
-                    </div>
-
-                </div>
-
-            </header>
-
-            {/* BODY */}
-
-            <div className="meeting-body">
-
-                <main className="video-area">
-
-                    <div
-                        className={`participant-grid participant-count-${Math.min(
-                            cameraTracks.length,
-                            12
-                        )}`}
-                    >
-
-                        {cameraTracks.length ===
-                        0 ? (
-                            <div className="empty-meeting">
-
-                                <div className="empty-meeting-icon">
-                                    👤
-                                </div>
-
-                                <h2>
-                                    Waiting for participants
-                                </h2>
-
-                                <p>
-                                    Share the meeting
-                                    link to invite
-                                    others.
-                                </p>
-
-                            </div>
-                        ) : (
-                            cameraTracks.map(
-                                (track) => (
-                                    <div
-                                        className="participant-tile-wrapper"
-                                        key={
-                                            track
-                                                .participant
-                                                .identity
-                                        }
-                                        style={{
-                                            position: "relative",
-                                            overflow: "hidden",
-                                        }}
-                                    >
-
-                                        <ParticipantTile
-                                            trackRef={
-                                                track
-                                            }
-                                            className="custom-participant-tile"
-                                        />
-
-                                        {
-                                            /*
-                                             * Mount one AirCanvas instance for EVERY
-                                             * camera tile. All instances receive the
-                                             * same LiveKit drawing events and maintain
-                                             * the same normalized history. Only the
-                                             * currently active participant's overlay
-                                             * is visible. This prevents the canvas from
-                                             * disappearing when control moves between
-                                             * host and participant.
-                                             */
-                                            <AirCanvas
-                                                activeUserIdentity={
-                                                    airCanvasUser
-                                                }
-                                                tileIdentity={
-                                                    track.participant.identity
-                                                }
-                                                isController={
-                                                    track.participant.identity ===
-                                                        room.localParticipant.identity &&
-                                                    (
-                                                        isHost ||
-                                                        (
-                                                            airCanvasAllowed &&
-                                                            airCanvasUser ===
-                                                                room.localParticipant.identity
-                                                        )
-                                                    )
-                                                }
-                                                mirror={
-                                                    track.participant.identity ===
-                                                    room.localParticipant.identity
-                                                }
-                                                showOverlay={
-                                                    track.participant.identity ===
-                                                    airCanvasUser
-                                                }
-                                            />
-                                        }
-
-                                        <div className="participant-overlay">
-
-                                            <div className="participant-name">
-                                                {track
-                                                    .participant
-                                                    .name ||
-                                                    track
-                                                        .participant
-                                                        .identity}
-
-                                                {track
-                                                    .participant
-                                                    .identity ===
-                                                    hostIdentity && (
-                                                        <span>
-                                                            {" "}
-                                                            • Host
-                                                        </span>
-                                                    )}
-
-                                                {airCanvasUser ===
-                                                    track
-                                                        .participant
-                                                        .identity && (
-                                                    <span>
-                                                        {" "}
-                                                        • AirCanvas
-                                                    </span>
-                                                )}
-                                            </div>
-
-                                            <div className="participant-mic">
-                                                {track
-                                                    .participant
-                                                    .isMicrophoneEnabled
-                                                    ? "🎤"
-                                                    : "🔇"}
-                                            </div>
-
-                                        </div>
-
-                                    </div>
-                                )
-                            )
-                        )}
-
-                    </div>
-
-                </main>
-
-                {/* SIDE PANEL */}
-
-                {activePanel && (
-                    <aside className="side-panel">
-
-                        <div className="side-panel-header">
-
-                            <div>
-
-                                {activePanel ===
-                                "participants" ? (
-                                    <>
-                                        <h2>
-                                            Participants
-                                        </h2>
-
-                                        <span>
-                                            {
-                                                participants.length
-                                            }{" "}
-                                            in meeting
-                                        </span>
-                                    </>
-                                ) : activePanel ===
-                                  "aircanvas" ? (
-                                    <>
-                                        <h2>
-                                            AirCanvas
-                                        </h2>
-
-                                        <span>
-                                            {isHost
-                                                ? "Host control"
-                                                : airCanvasAllowed
-                                                ? "You have access"
-                                                : "Permission required"}
-                                        </span>
-                                    </>
-                                ) : (
-                                    <>
-                                        <h2>
-                                            Messages
-                                        </h2>
-
-                                        <span>
-                                            Meeting chat
-                                        </span>
-                                    </>
-                                )}
-
-                            </div>
-
-                            <button
-                                className="close-panel"
-                                onClick={() =>
-                                    setActivePanel(
-                                        null
-                                    )
-                                }
-                            >
-                                ✕
-                            </button>
-
-                        </div>
-
-                        {/* PARTICIPANTS */}
-
-                        {activePanel ===
-                            "participants" && (
-                            <div className="participants-list">
-
-                                {participants.map(
-                                    (
-                                        participant
-                                    ) => (
-                                        <div
-                                            className="participant-list-item"
-                                            key={
-                                                participant.identity
-                                            }
-                                        >
-
-                                            <div className="participant-avatar">
-                                                {(
-                                                    participant.name ||
-                                                    participant.identity ||
-                                                    "U"
-                                                )
-                                                    .charAt(
-                                                        0
-                                                    )
-                                                    .toUpperCase()}
-                                            </div>
-
-                                            <div className="participant-list-info">
-
-                                                <strong>
-                                                    {participant.name ||
-                                                        participant.identity}
-                                                </strong>
-
-                                                {participant.identity ===
-                                                    room
-                                                        .localParticipant
-                                                        .identity && (
-                                                    <span>
-                                                        You
-                                                        {isHost &&
-                                                            " • Host"}
-                                                    </span>
-                                                )}
-
-                                            </div>
-
-                                            <div className="participant-status">
-
-                                                {participant.isMicrophoneEnabled
-                                                    ? "🎤"
-                                                    : "🔇"}
-
-                                                {participant.isCameraEnabled
-                                                    ? "📹"
-                                                    : "📹̸"}
-
-                                            </div>
-
-                                        </div>
-                                    )
-                                )}
-
-                            </div>
-                        )}
-
-                        {/* CHAT */}
-
-                        {activePanel ===
-                            "chat" && (
-                            <div className="chat-panel">
-                                <Chat />
-                            </div>
-                        )}
-
-                        {/* AIR CANVAS CONTROL */}
-
-                        {activePanel ===
-                            "aircanvas" && (
-                            <div
-                                style={{
-                                    padding:
-                                        "18px",
-                                    color:
-                                        "#dce3ee",
-                                }}
-                            >
-
-                                {isHost ? (
-                                    <>
-                                        <div
-                                            style={{
-                                                padding:
-                                                    "14px",
-                                                borderRadius:
-                                                    "10px",
-                                                background:
-                                                    "#151f31",
-                                                marginBottom:
-                                                    "15px",
-                                            }}
-                                        >
-                                            <strong>
-                                                ✋ Host
-                                                Control
-                                            </strong>
-
-                                            <p
-                                                style={{
-                                                    color:
-                                                        "#8995a9",
-                                                    fontSize:
-                                                        "12px",
-                                                    lineHeight:
-                                                        "1.5",
-                                                }}
-                                            >
-                                                You
-                                                always
-                                                have
-                                                AirCanvas
-                                                access.
-                                                Participants
-                                                must
-                                                request
-                                                permission
-                                                before
-                                                using
-                                                it.
-                                            </p>
-                                        </div>
-
-                                        {airCanvasUser ? (
-                                            <div
-                                                style={{
-                                                    padding:
-                                                        "14px",
-                                                    borderRadius:
-                                                        "10px",
-                                                    background:
-                                                        "#162b2b",
-                                                    marginBottom:
-                                                        "12px",
-                                                }}
-                                            >
-                                                <strong>
-                                                    AirCanvas
-                                                    active
-                                                </strong>
-
-                                                <p
-                                                    style={{
-                                                        margin:
-                                                            "7px 0 12px",
-                                                        color:
-                                                            "#9db2b3",
-                                                        fontSize:
-                                                            "12px",
-                                                    }}
-                                                >
-                                                    {participants.find(
-                                                        (
-                                                            p
-                                                        ) =>
-                                                            p.identity ===
-                                                            airCanvasUser
-                                                    )
-                                                        ?.name ||
-                                                        "Participant"}
-                                                    {" "}
-                                                    can
-                                                    use
-                                                    AirCanvas.
-                                                </p>
-
-                                                <button
-                                                    className="secondary-button"
-                                                    onClick={() =>
-                                                        revokeAirCanvas(
-                                                            airCanvasUser
-                                                        )
-                                                    }
-                                                >
-                                                    Revoke
-                                                    Access
-                                                </button>
-                                            </div>
-                                        ) : (
-                                            <div
-                                                style={{
-                                                    padding:
-                                                        "14px",
-                                                    borderRadius:
-                                                        "10px",
-                                                    background:
-                                                        "#151f31",
-                                                    marginBottom:
-                                                        "12px",
-                                                }}
-                                            >
-                                                <strong>
-                                                    No participant
-                                                    has control
-                                                </strong>
-
-                                                <p
-                                                    style={{
-                                                        color:
-                                                            "#8995a9",
-                                                        fontSize:
-                                                            "12px",
-                                                    }}
-                                                >
-                                                    AirCanvas
-                                                    is available
-                                                    for you.
-                                                    It will appear
-                                                    directly over
-                                                    your camera
-                                                    when active.
-                                                </p>
-                                            </div>
-                                        )}
-
-                                        {pendingRequest &&
-                                            !pendingRequest.waiting && (
-                                                <div
-                                                    style={{
-                                                        padding:
-                                                            "14px",
-                                                        borderRadius:
-                                                            "10px",
-                                                        background:
-                                                            "#202a3d",
-                                                    }}
-                                                >
-
-                                                    <strong>
-                                                        AirCanvas
-                                                        Request
-                                                    </strong>
-
-                                                    <p
-                                                        style={{
-                                                            color:
-                                                                "#c2ccda",
-                                                            fontSize:
-                                                                "13px",
-                                                        }}
-                                                    >
-                                                        {
-                                                            pendingRequest.name
-                                                        }{" "}
-                                                        wants
-                                                        to use
-                                                        AirCanvas.
-                                                    </p>
-
-                                                    <div
-                                                        style={{
-                                                            display:
-                                                                "flex",
-                                                            gap:
-                                                                "8px",
-                                                        }}
-                                                    >
-
-                                                        <button
-                                                            className="primary-button"
-                                                            onClick={() =>
-                                                                allowAirCanvas(
-                                                                    pendingRequest.identity
-                                                                )
-                                                            }
-                                                        >
-                                                            Allow
-                                                        </button>
-
-                                                        <button
-                                                            className="secondary-button"
-                                                            onClick={() =>
-                                                                denyAirCanvas(
-                                                                    pendingRequest.identity
-                                                                )
-                                                            }
-                                                        >
-                                                            Deny
-                                                        </button>
-
-                                                    </div>
-
-                                                </div>
-                                            )}
-
-                                    </>
-                                ) : airCanvasAllowed ? (
-                                    <>
-                                        <div
-                                            style={{
-                                                padding:
-                                                    "16px",
-                                                borderRadius:
-                                                    "10px",
-                                                background:
-                                                    "#162b2b",
-                                            }}
-                                        >
-                                            <strong>
-                                                ✓ AirCanvas
-                                                Access Granted
-                                            </strong>
-
-                                            <p
-                                                style={{
-                                                    color:
-                                                        "#9db2b3",
-                                                    fontSize:
-                                                        "12px",
-                                                    lineHeight:
-                                                        "1.5",
-                                                }}
-                                            >
-                                                The host has
-                                                permitted you
-                                                to use
-                                                AirCanvas.
-                                                Your drawing
-                                                canvas is
-                                                displayed
-                                                directly over
-                                                the active
-                                                camera tile.
-                                            </p>
-                                        </div>
-                                    </>
-                                ) : (
-                                    <>
-                                        <div
-                                            style={{
-                                                padding:
-                                                    "16px",
-                                                borderRadius:
-                                                    "10px",
-                                                background:
-                                                    "#151f31",
-                                            }}
-                                        >
-                                            <strong>
-                                                AirCanvas
-                                                Permission
-                                            </strong>
-
-                                            <p
-                                                style={{
-                                                    color:
-                                                        "#8995a9",
-                                                    fontSize:
-                                                        "12px",
-                                                    lineHeight:
-                                                        "1.5",
-                                                }}
-                                            >
-                                                You need
-                                                permission
-                                                from the
-                                                meeting host
-                                                before you
-                                                can use
-                                                AirCanvas.
-                                            </p>
-
-                                            <button
-                                                className="primary-button"
-                                                onClick={
-                                                    requestAirCanvas
-                                                }
-                                                disabled={
-                                                    pendingRequest?.waiting
-                                                }
-                                            >
-                                                {pendingRequest?.waiting
-                                                    ? "Request Sent..."
-                                                    : "Request AirCanvas"}
-                                            </button>
-                                        </div>
-                                    </>
-                                )}
-
-                            </div>
-                        )}
-
-                    </aside>
-                )}
-
-            </div>
-
-            {/* CONTROLS */}
-
-            <div className="meeting-controls">
-
-                <div className="controls-left">
-
-                    <ControlButton
-                        icon={
-                            micEnabled
-                                ? "🎤"
-                                : "🔇"
-                        }
-                        label={
-                            micEnabled
-                                ? "Mute"
-                                : "Unmute"
-                        }
-                        active={
-                            micEnabled
-                        }
-                        onClick={
-                            toggleMicrophone
-                        }
-                    />
-
-                    <ControlButton
-                        icon="📹"
-                        label={
-                            cameraEnabled
-                                ? "Camera"
-                                : "Camera Off"
-                        }
-                        active={
-                            cameraEnabled
-                        }
-                        onClick={
-                            toggleCamera
-                        }
-                    />
-
-                    <ControlButton
-                        icon="🖥"
-                        label={
-                            screenSharing
-                                ? "Stop Share"
-                                : "Share Screen"
-                        }
-                        active={
-                            screenSharing
-                        }
-                        onClick={
-                            toggleScreenShare
-                        }
-                    />
-
-                    <ControlButton
-                        icon="💬"
-                        label="Chat"
-                        active={
-                            activePanel ===
-                            "chat"
-                        }
-                        onClick={() =>
-                            togglePanel(
-                                "chat"
-                            )
-                        }
-                    />
-
-                    <ControlButton
-                        icon="👥"
-                        label={`Participants (${participants.length})`}
-                        active={
-                            activePanel ===
-                            "participants"
-                        }
-                        onClick={() =>
-                            togglePanel(
-                                "participants"
-                            )
-                        }
-                    />
-
-                    <ControlButton
-                        icon="✋"
-                        label={
-                            isHost
-                                ? "AirCanvas"
-                                : airCanvasAllowed
-                                ? "AirCanvas"
-                                : pendingRequest?.waiting
-                                ? "Requested"
-                                : "Request Canvas"
-                        }
-                        active={
-                            activePanel ===
-                            "aircanvas"
-                        }
-                        special
-                        onClick={
-                            handleAirCanvas
-                        }
-                    />
-
-                </div>
-
-                <div className="controls-right">
-
-                    <button
-                        className="leave-button"
-                        onClick={
-                            handleLeave
-                        }
-                    >
-                        <span>
-                            🚪
-                        </span>
-
-                        <span>
-                            Leave
-                        </span>
-                    </button>
-
-                </div>
-
-            </div>
-
-            <RoomAudioRenderer />
-
-        </div>
-    );
-}
-
-/* =========================================================
-   CONTROL BUTTON
-========================================================= */
-
-function ControlButton({
-    icon,
-    label,
-    active,
-    onClick,
-    special = false,
-}) {
-    return (
-        <button
-            type="button"
-            className={`meeting-control-button ${
-                active
-                    ? "active"
-                    : ""
-            } ${
-                special
-                    ? "aircanvas-control"
-                    : ""
-            }`}
-            onClick={onClick}
-            title={label}
-        >
-            <span className="control-icon">
-                {icon}
-            </span>
-
-            <span className="control-label">
-                {label}
-            </span>
-        </button>
-    );
-}
-
-/* =========================================================
-   MAIN APP
-========================================================= */
-
-function App() {
-    const [roomId, setRoomId] =
-        useState(null);
-
-    const [
-        participantName,
-        setParticipantName,
-    ] = useState("");
-
-    const [token, setToken] =
-        useState("");
-
-    const [serverUrl, setServerUrl] =
-        useState("");
-
-    const [loading, setLoading] =
-        useState(false);
-
-    const [error, setError] =
-        useState("");
-
-    const [
-        joinRoomInput,
-        setJoinRoomInput,
-    ] = useState("");
-
-    const [
-        connectionStatus,
-        setConnectionStatus,
-    ] = useState(
-        "Not connected"
-    );
-
-    const [isHost, setIsHost] =
-        useState(false);
-
-    /* =====================================================
-       READ ROOM FROM URL
-    ===================================================== */
-
+    }, [
+        isController,
+    ]);
+
+    /*
+     * Resize the transparent overlay whenever the tile changes.
+     */
     useEffect(() => {
-        const pathParts =
-            window.location.pathname
-                .split("/")
-                .filter(Boolean);
+        mountedRef.current =
+            true;
+
+        const resize =
+            () => {
+                if (
+                    !mountedRef.current
+                ) {
+                    return;
+                }
+
+                resizeCanvas();
+            };
+
+        resize();
+
+        const observer =
+            new ResizeObserver(
+                resize
+            );
 
         if (
-            pathParts.length === 2 &&
-            pathParts[0].toLowerCase() ===
-                "meeting"
+            canvasRef.current
         ) {
-            const currentRoomId =
-                pathParts[1].toUpperCase();
-
-            setRoomId(currentRoomId);
-
-            /*
-             * When the host creates a meeting from localhost,
-             * the browser is redirected to the production Vercel
-             * meeting URL. The host token is temporarily transferred
-             * in the URL fragment because fragments are not sent to
-             * the server. We immediately move the token into
-             * sessionStorage and remove the fragment from the URL.
-             */
-            const hashParams =
-                new URLSearchParams(
-                    window.location.hash.substring(1)
-                );
-
-            const transferredHostToken =
-                hashParams.get("hostToken");
-
-            if (transferredHostToken) {
-                /*
-                 * sessionStorage, not localStorage: the host token
-                 * must belong to THIS TAB only. localStorage is shared
-                 * by every tab/window on the same origin, so opening a
-                 * second tab to the same meeting URL would silently
-                 * read this token too and both tabs would think they
-                 * were the host. sessionStorage is private per tab and
-                 * still survives refresh/navigation within that tab.
-                 */
-                sessionStorage.setItem(
-                    `aircanvas-host-${currentRoomId}`,
-                    transferredHostToken
-                );
-
-                window.history.replaceState(
-                    {},
-                    "",
-                    window.location.pathname
-                );
-            }
+            observer.observe(
+                canvasRef.current
+            );
         }
+
+        window.addEventListener(
+            "resize",
+            resize
+        );
+
+        return () => {
+            mountedRef.current =
+                false;
+
+            observer.disconnect();
+
+            window.removeEventListener(
+                "resize",
+                resize
+            );
+        };
     }, []);
 
-
-    /* =====================================================
-       CREATE MEETING
-    ===================================================== */
-
-    const createMeeting =
-        async () => {
-            try {
-                setLoading(true);
-                setError("");
-
-                const response =
-                    await fetch(
-                        `${BACKEND_URL}/api/meeting/create`,
-                        {
-                            method: "POST",
-                            headers: {
-                                "Content-Type":
-                                    "application/json",
-                            },
-                        }
-                    );
-
-                const data =
-                    await response.json();
-
-                if (
-                    !response.ok ||
-                    !data.success
-                ) {
-                    throw new Error(
-                        data.message ||
-                            "Unable to create meeting."
-                    );
-                }
-
-                /*
-                 * Save the host token on the current origin too.
-                 * This keeps the host authenticated if the user
-                 * continues working on the same development origin.
-                 *
-                 * sessionStorage (not localStorage): this token must
-                 * stay bound to the tab that actually clicked "Create
-                 * meeting". A second tab opened later to the same
-                 * meeting link — even in the same browser — must NOT
-                 * inherit host status.
-                 */
-                if (data.hostToken) {
-                    sessionStorage.setItem(
-                        `aircanvas-host-${data.roomId}`,
-                        data.hostToken
-                    );
-                }
-
-                /*
-                 * The backend now returns the public Vercel meeting
-                 * link. We must navigate to that URL instead of using
-                 * history.pushState(), because pushState() can only
-                 * change URLs on the current origin.
-                 *
-                 * The host token is transferred in the URL fragment.
-                 * Fragments are handled only by the browser and are
-                 * not sent to Render. The production App.jsx reads
-                 * the fragment, stores the token in sessionStorage,
-                 * and immediately removes the fragment from the URL.
-                 */
-                const meetingLink =
-                    data.meetingLink ||
-                    `https://aircanvas-meet.vercel.app/meeting/${data.roomId}`;
-
-                const hostToken =
-                    data.hostToken || "";
-
-                const productionMeetingLink =
-                    hostToken
-                        ? `${meetingLink}#hostToken=${encodeURIComponent(
-                              hostToken
-                          )}`
-                        : meetingLink;
-
-                window.location.href =
-                    productionMeetingLink;
-            } catch (err) {
-                console.error(
-                    "Create meeting error:",
-                    err
-                );
-
-                setError(
-                    err.message ||
-                        "Something went wrong while creating the meeting."
-                );
-
-                setLoading(false);
-            }
-        };
-
-
-    /* =====================================================
-       JOIN EXISTING MEETING
-    ===================================================== */
-
-    const joinExistingMeeting =
-        () => {
-            const cleanRoomId =
-                joinRoomInput
-                    .trim()
-                    .toUpperCase();
-
-            if (!cleanRoomId) {
-                setError(
-                    "Please enter a meeting ID."
-                );
-                return;
-            }
-
-            setError("");
-
-            window.history.pushState(
-                {},
-                "",
-                `/meeting/${cleanRoomId}`
+    /*
+     * Redraw when the tile/video becomes available.
+     */
+    useEffect(() => {
+        const timer =
+            window.setTimeout(
+                () => {
+                    resizeCanvas();
+                    redrawHistory();
+                },
+                150
             );
 
-            setRoomId(
-                cleanRoomId
+        return () =>
+            window.clearTimeout(
+                timer
             );
-        };
-
-    /* =====================================================
-       JOIN MEETING
-    ===================================================== */
-
-    const joinMeeting =
-        async () => {
-            if (
-                !participantName.trim()
-            ) {
-                setError(
-                    "Please enter your name."
-                );
-                return;
-            }
-
-            if (!roomId) {
-                setError(
-                    "Meeting ID is missing."
-                );
-                return;
-            }
-
-            try {
-                setLoading(true);
-                setError("");
-
-                setConnectionStatus(
-                    "Requesting access..."
-                );
-
-                /*
-                 * Only the creator's ORIGINAL TAB will have this
-                 * token (sessionStorage, scoped per tab — see the
-                 * matching setItem calls above for why).
-                 */
-                const hostToken =
-                    sessionStorage.getItem(
-                        `aircanvas-host-${roomId}`
-                    );
-
-                const response =
-                    await fetch(
-                        `${BACKEND_URL}/api/meeting/token`,
-                        {
-                            method: "POST",
-                            headers: {
-                                "Content-Type":
-                                    "application/json",
-                            },
-                            body: JSON.stringify(
-                                {
-                                    roomId,
-                                    participantName:
-                                        participantName.trim(),
-                                    hostToken:
-                                        hostToken ||
-                                        undefined,
-                                }
-                            ),
-                        }
-                    );
-
-                const data =
-                    await response.json();
-
-                if (
-                    !response.ok ||
-                    !data.success
-                ) {
-                    throw new Error(
-                        data.message ||
-                            "Unable to get meeting access."
-                    );
-                }
-
-                setIsHost(
-                    Boolean(
-                        data.isHost
-                    )
-                );
-
-                setConnectionStatus(
-                    "Connecting..."
-                );
-
-                setToken(
-                    data.token
-                );
-
-                setServerUrl(
-                    data.serverUrl
-                );
-            } catch (err) {
-                console.error(
-                    "Meeting token error:",
-                    err
-                );
-
-                setConnectionStatus(
-                    "Connection failed"
-                );
-
-                setError(
-                    err.message ||
-                        "Unable to connect to the meeting."
-                );
-            } finally {
-                setLoading(false);
-            }
-        };
-
-    /* =====================================================
-       CONNECTED
-    ===================================================== */
-
-    const handleConnected =
-        () => {
-            console.log(
-                "LIVEKIT CONNECTED SUCCESSFULLY"
-            );
-
-            setConnectionStatus(
-                "Connected"
-            );
-
-            setError("");
-        };
-
-    /* =====================================================
-       LIVEKIT ERROR
-    ===================================================== */
-
-    const handleLiveKitError =
-        (liveKitError) => {
-            console.error(
-                "LIVEKIT CONNECTION ERROR:",
-                liveKitError
-            );
-
-            setConnectionStatus(
-                "Connection failed"
-            );
-
-            setError(
-                liveKitError?.message ||
-                    "LiveKit could not connect."
-            );
-        };
-
-    /* =====================================================
-       MEDIA FAILURE
-    ===================================================== */
-
-    const handleMediaDeviceFailure =
-        (failure, kind) => {
-            console.error(
-                "MEDIA DEVICE ERROR:",
-                failure
-            );
-
-            setConnectionStatus(
-                "Media device problem"
-            );
-
-            setError(
-                `Could not access your ${
-                    kind ===
-                    "audioinput"
-                        ? "microphone"
-                        : kind ===
-                          "videoinput"
-                        ? "camera"
-                        : "media device"
-                }. Please check browser permissions.`
-            );
-        };
-
-    /* =====================================================
-       DISCONNECTED
-    ===================================================== */
-
-    const handleDisconnected =
-        (reason) => {
-            console.warn(
-                "LIVEKIT DISCONNECTED:",
-                reason
-            );
-
-            setConnectionStatus(
-                "Disconnected"
-            );
-        };
-
-    /* =====================================================
-       LEAVE
-    ===================================================== */
-
-    const leaveMeeting =
-        () => {
-            setToken("");
-            setServerUrl("");
-            setParticipantName("");
-            setError("");
-
-            setConnectionStatus(
-                "Not connected"
-            );
-
-            setIsHost(false);
-
-            window.history.pushState(
-                {},
-                "",
-                "/"
-            );
-
-            setRoomId(null);
-        };
-
-    /* =====================================================
-       REAL MEETING
-    ===================================================== */
-
-    if (
-        token &&
-        serverUrl
-    ) {
-        return (
-            <div className="meeting-app">
-
-                <LiveKitRoom
-                    token={token}
-                    serverUrl={serverUrl}
-                    connect={true}
-                    audio={true}
-                    video={true}
-                    onConnected={
-                        handleConnected
-                    }
-                    onError={
-                        handleLiveKitError
-                    }
-                    onDisconnected={
-                        handleDisconnected
-                    }
-                    onMediaDeviceFailure={
-                        handleMediaDeviceFailure
-                    }
-                >
-                    <MeetingRoom
-                        roomId={roomId}
-                        connectionStatus={
-                            connectionStatus
-                        }
-                        onLeave={
-                            leaveMeeting
-                        }
-                        isHost={isHost}
-                    />
-                </LiveKitRoom>
-
-                {error && (
-                    <div className="meeting-error">
-                        {error}
-                    </div>
-                )}
-
-            </div>
-        );
-    }
-
-    /* =====================================================
-       JOIN SCREEN
-    ===================================================== */
-
-    if (roomId) {
-        return (
-            <div className="landing-page">
-
-                <div className="join-card">
-
-                    <div className="large-brand-icon">
-                        ✋
-                    </div>
-
-                    <h1>
-                        Join AirCanvas Meet
-                    </h1>
-
-                    <p className="subtitle">
-                        Join your online meeting
-                    </p>
-
-                    <div className="room-id-box">
-
-                        <span>
-                            Meeting ID
-                        </span>
-
-                        <strong>
-                            {roomId}
-                        </strong>
-
-                    </div>
-
-                    <label>
-                        Your name
-                    </label>
-
-                    <input
-                        type="text"
-                        placeholder="Enter your name"
-                        value={
-                            participantName
-                        }
-                        onChange={(
-                            event
-                        ) =>
-                            setParticipantName(
-                                event.target
-                                    .value
-                            )
-                        }
-                        onKeyDown={(
-                            event
-                        ) => {
-                            if (
-                                event.key ===
-                                "Enter"
-                            ) {
-                                joinMeeting();
-                            }
-                        }}
-                    />
-
-                    {error && (
-                        <div className="error-message">
-                            {error}
-                        </div>
-                    )}
-
-                    <button
-                        className="primary-button"
-                        onClick={
-                            joinMeeting
-                        }
-                        disabled={
-                            loading
-                        }
-                    >
-                        {loading
-                            ? "Connecting..."
-                            : "Join Meeting"}
-                    </button>
-
-                    <button
-                        className="back-button"
-                        onClick={() => {
-                            window.history.pushState(
-                                {},
-                                "",
-                                "/"
-                            );
-
-                            setRoomId(
-                                null
-                            );
-
-                            setError("");
-                        }}
-                    >
-                        ← Back
-                    </button>
-
-                </div>
-
-            </div>
-        );
-    }
-
-    /* =====================================================
-       HOME
-    ===================================================== */
+    }, [
+        canvasTileIdentity,
+        activeUserIdentity,
+        showOverlay,
+    ]);
 
     return (
-        <div className="landing-page">
+        <>
+            <canvas
+                ref={canvasRef}
+                className="aircanvas-camera-overlay"
+                aria-hidden="true"
+                style={{
+                    position:
+                        "absolute",
+                    inset: 0,
+                    width: "100%",
+                    height: "100%",
+                    zIndex: 25,
+                    pointerEvents:
+                        "none",
+                    display:
+                        showOverlay ? "block" : "none",
+                }}
+            />
 
-            <div className="home-card">
-
-                <div className="large-brand-icon">
-                    ✋
-                </div>
-
-                <h1>
-                    AirCanvas Meet
-                </h1>
-
-                <p className="subtitle">
-                    Real-time video meetings
-                    with collaborative AirCanvas
-                </p>
-
-                <button
-                    className="primary-button"
-                    onClick={
-                        createMeeting
-                    }
-                    disabled={
-                        loading
-                    }
-                >
-                    {loading
-                        ? "Creating..."
-                        : "Create New Meeting"}
-                </button>
-
-                <div className="divider">
-                    <span>
-                        OR
-                    </span>
-                </div>
-
-                <label>
-                    Have a meeting ID?
-                </label>
-
-                <input
-                    type="text"
-                    placeholder="Enter meeting ID"
-                    value={
-                        joinRoomInput
-                    }
-                    onChange={(
-                        event
-                    ) =>
-                        setJoinRoomInput(
-                            event.target
-                                .value
-                        )
-                    }
-                    onKeyDown={(
-                        event
-                    ) => {
-                        if (
-                            event.key ===
-                            "Enter"
-                        ) {
-                            joinExistingMeeting();
-                        }
-                    }}
-                />
-
-                <button
-                    className="secondary-button"
-                    onClick={
-                        joinExistingMeeting
-                    }
-                >
-                    Join Meeting
-                </button>
-
-                {error && (
-                    <div className="error-message">
-                        {error}
-                    </div>
-                )}
-
-                <div className="feature-list">
-
-                    <div>
-                        <span>✓</span>
-                        Real-time video & audio
-                    </div>
-
-                    <div>
-                        <span>✓</span>
-                        Multiple participants
-                    </div>
-
-                    <div>
-                        <span>✓</span>
-                        Host-controlled AirCanvas
-                    </div>
-
-                    <div>
-                        <span>✓</span>
-                        AI gesture interaction
-                    </div>
-
-                </div>
-
-            </div>
-
-        </div>
+            <video
+                ref={
+                    processingVideoRef
+                }
+                muted
+                playsInline
+                autoPlay
+                aria-hidden="true"
+                style={{
+                    position:
+                        "fixed",
+                    width: "1px",
+                    height: "1px",
+                    left:
+                        "-10000px",
+                    top:
+                        "-10000px",
+                    opacity: 0,
+                    pointerEvents:
+                        "none",
+                }}
+            />
+        </>
     );
 }
-
-export default App;
