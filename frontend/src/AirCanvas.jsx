@@ -247,9 +247,13 @@ function drawDot(
 
 export default function AirCanvas({
     activeUserIdentity,
+    tileIdentity,
     isController = false,
     mirror = false,
+    showOverlay = true,
 }) {
+    const canvasTileIdentity =
+        tileIdentity || activeUserIdentity;
     const room = useRoomContext();
 
     const canvasRef =
@@ -307,7 +311,7 @@ export default function AirCanvas({
                             room.localParticipant.identity,
                         targetIdentity:
                             message.targetIdentity ||
-                            activeUserIdentity,
+                            canvasTileIdentity,
                     })
                 );
 
@@ -378,6 +382,34 @@ export default function AirCanvas({
 
         redrawHistory();
     };
+
+    /*
+     * On mount, ask the owner of this tile for whatever they have
+     * already drawn (see the "history-request" / "history-dump"
+     * handling in the DataReceived effect below). We never need to
+     * request our OWN tile's history — nobody but us could have
+     * drawn on it, so there is nothing anyone else could send back.
+     */
+    useEffect(() => {
+        if (
+            canvasTileIdentity ===
+            room.localParticipant.identity
+        ) {
+            return;
+        }
+
+        send(
+            {
+                type: "canvas-event",
+                event: {
+                    type: "history-request",
+                    targetIdentity: canvasTileIdentity,
+                },
+            },
+            true
+        );
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [canvasTileIdentity]);
 
     const redrawHistory = () => {
         const canvas =
@@ -672,7 +704,7 @@ export default function AirCanvas({
                                 type:
                                     "clear",
                                 targetIdentity:
-                                    activeUserIdentity,
+                                    canvasTileIdentity,
                             },
                         },
                         true
@@ -717,6 +749,20 @@ export default function AirCanvas({
                 ),
             };
 
+            /*
+             * IMPORTANT: rawPoint is the CANONICAL coordinate —
+             * exactly what MediaPipe reports, never flipped for the
+             * local selfie-camera mirror. This is the ONLY point value
+             * that ever goes into smoothing, history, and the network
+             * payload (event.point / event.from / event.to).
+             *
+             * Mirroring must be applied ONLY at the moment something
+             * is actually drawn to a specific <canvas>, via the
+             * `mirrored` argument to getCanvasPoint() below — never
+             * baked into the coordinate itself. That is what keeps
+             * local drawing, remote drawing, and history replay all
+             * consistent no matter who is mirrored on whose screen.
+             */
             const point =
                 smoothPoint(
                     lastPointRef.current,
@@ -764,7 +810,7 @@ export default function AirCanvas({
                     mode: gesture,
                     point,
                     width,
-                    targetIdentity: activeUserIdentity,
+                    targetIdentity: canvasTileIdentity,
                 };
 
                 addEvent(event);
@@ -813,7 +859,7 @@ export default function AirCanvas({
                     lastPointRef.current,
                 to: point,
                 width,
-                targetIdentity: activeUserIdentity,
+                targetIdentity: canvasTileIdentity,
             };
 
             const from =
@@ -863,7 +909,7 @@ export default function AirCanvas({
     useEffect(() => {
         const handler = (
             payload,
-            _participant,
+            sourceParticipant,
             _kind,
             topic
         ) => {
@@ -896,13 +942,113 @@ export default function AirCanvas({
                 }
 
                 /*
-                 * Each AirCanvas belongs to one participant's camera tile.
-                 * Only render events addressed to this tile.
-                 * Legacy events without targetIdentity are still accepted.
+                 * CANVAS HISTORY SYNC
+                 *
+                 * A participant whose AirCanvas instance just mounted
+                 * (they joined mid-meeting, or a tile just appeared)
+                 * starts with an empty historyRef. Without this, they
+                 * see nothing already drawn on that tile until its
+                 * owner draws something NEW — the "host draws, but a
+                 * participant who joined late sees nothing" bug.
+                 *
+                 * Only the participant whose OWN identity equals a
+                 * tile's identity can ever have authoritative history
+                 * for that tile (that is the only client that has ever
+                 * been allowed to draw on it), so a viewer asks that
+                 * owner directly and the owner replies with a one-time
+                 * full dump, independent of who currently holds AirCanvas
+                 * write permission.
                  */
+                if (event.type === "history-request") {
+                    if (
+                        message.sourceIdentity ===
+                        room.localParticipant.identity
+                    ) {
+                        // Our own request, echoed back to us. Ignore it.
+                        return;
+                    }
+
+                    if (
+                        event.targetIdentity ===
+                            canvasTileIdentity &&
+                        canvasTileIdentity ===
+                            room.localParticipant.identity
+                    ) {
+                        send(
+                            {
+                                type: "canvas-event",
+                                event: {
+                                    type: "history-dump",
+                                    history:
+                                        historyRef.current,
+                                },
+                                targetIdentity:
+                                    message.sourceIdentity,
+                            },
+                            true
+                        );
+                    }
+
+                    return;
+                }
+
+                if (event.type === "history-dump") {
+                    if (
+                        message.targetIdentity ===
+                            room.localParticipant.identity &&
+                        message.sourceIdentity ===
+                            canvasTileIdentity
+                    ) {
+                        historyRef.current =
+                            Array.isArray(event.history)
+                                ? event.history
+                                : [];
+
+                        redrawHistory();
+                    }
+
+                    return;
+                }
+
+                /*
+                 * Each AirCanvas belongs to exactly one participant tile.
+                 * Route a drawing by the identity of the participant who
+                 * produced it. This prevents one person's stroke from being
+                 * rendered on every tile. targetIdentity is retained only as
+                 * a compatibility guard for older packets.
+                 */
+                const sourceIdentity =
+                    event.sourceIdentity ||
+                    message.sourceIdentity ||
+                    sourceParticipant?.identity;
+
+                if (
+                    sourceIdentity &&
+                    sourceIdentity !== canvasTileIdentity
+                ) {
+                    return;
+                }
+
                 if (
                     event.targetIdentity &&
-                    event.targetIdentity !== activeUserIdentity
+                    event.targetIdentity !== canvasTileIdentity
+                ) {
+                    return;
+                }
+
+                const routedEvent = {
+                    ...event,
+                    sourceIdentity,
+                };
+
+                /*
+                 * The controller already draws its own event locally.
+                 * Ignore the echoed packet from LiveKit on that same
+                 * browser so the local stroke is not duplicated.
+                 */
+                if (
+                    sourceParticipant?.identity ===
+                    room.localParticipant.identity
                 ) {
                     return;
                 }
@@ -912,7 +1058,7 @@ export default function AirCanvas({
                     "clear"
                 ) {
                     historyRef.current.push(
-                        event
+                        routedEvent
                     );
 
                     clearLocalCanvas(
@@ -931,7 +1077,7 @@ export default function AirCanvas({
                     return;
                 }
 
-                addEvent(event);
+                addEvent(routedEvent);
 
                 const canvas =
                     canvasRef.current;
@@ -954,41 +1100,41 @@ export default function AirCanvas({
                 ) {
                     const point =
                         getCanvasPoint(
-                            event.point,
+                            routedEvent.point,
                             canvas,
                             video,
-                            mirror
+                            false
                         );
 
                     drawDot(
                         ctx,
                         point,
-                        event.mode,
-                        event.width
+                        routedEvent.mode,
+                        routedEvent.width
                     );
                 } else {
                     const from =
                         getCanvasPoint(
-                            event.from,
+                            routedEvent.from,
                             canvas,
                             video,
-                            mirror
+                            false
                         );
 
                     const to =
                         getCanvasPoint(
-                            event.to,
+                            routedEvent.to,
                             canvas,
                             video,
-                            mirror
+                            false
                         );
 
                     drawLine(
                         ctx,
                         from,
                         to,
-                        event.mode,
-                        event.width
+                        routedEvent.mode,
+                        routedEvent.width
                     );
                 }
             } catch (error) {
@@ -1012,6 +1158,7 @@ export default function AirCanvas({
         };
     }, [
         room,
+        activeUserIdentity,
         mirror,
     ]);
 
@@ -1030,11 +1177,11 @@ export default function AirCanvas({
                 if (stopped) return;
 
                 const participant =
-                    activeUserIdentity ===
+                    canvasTileIdentity ===
                     room.localParticipant.identity
                         ? room.localParticipant
                         : room.remoteParticipants.get(
-                              activeUserIdentity
+                              canvasTileIdentity
                           );
 
                 const publication =
@@ -1085,6 +1232,12 @@ export default function AirCanvas({
                     trackId;
             };
 
+        lastVideoTrackIdRef.current = null;
+
+        if (processingVideoRef.current) {
+            processingVideoRef.current.srcObject = null;
+        }
+
         attachVideo();
 
         const interval =
@@ -1098,11 +1251,17 @@ export default function AirCanvas({
             window.clearInterval(
                 interval
             );
+
+            if (processingVideoRef.current) {
+                processingVideoRef.current.pause?.();
+                processingVideoRef.current.srcObject = null;
+            }
+
+            lastVideoTrackIdRef.current = null;
         };
     }, [
         room,
-        isController,
-        activeUserIdentity,
+        canvasTileIdentity,
     ]);
 
     /*
@@ -1419,8 +1578,9 @@ export default function AirCanvas({
                 timer
             );
     }, [
+        canvasTileIdentity,
         activeUserIdentity,
-        mirror,
+        showOverlay,
     ]);
 
     return (
@@ -1439,7 +1599,7 @@ export default function AirCanvas({
                     pointerEvents:
                         "none",
                     display:
-                        "block",
+                        showOverlay ? "block" : "none",
                 }}
             />
 
