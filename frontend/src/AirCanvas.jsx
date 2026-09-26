@@ -14,8 +14,6 @@ function featuresFromLandmarks(landmarks, mirrorX = false) {
         // The trained model is right-hand oriented.  For a left hand,
         // reflecting X around the wrist converts it into the same canonical
         // shape without changing the user's actual drawing coordinates.
-        // (This is an internal feature-normalization trick for the gesture
-        // classifier only — unrelated to on-screen mirroring.)
         const relativeX = point.x - wrist.x;
         const canonicalX = mirrorX
             ? -relativeX
@@ -115,18 +113,14 @@ function smoothPoint(previous, current, alpha = 0.58) {
  *
  * This function reproduces the object-fit: cover transform so that the
  * annotation stays on the same visual position as the hand/video.
- *
- * NO MIRRORING IS APPLIED ANYWHERE IN THIS PIPELINE. Points are drawn
- * exactly as MediaPipe reports them, for every viewer, on every tile.
- * (The corresponding video elements are also forced to
- * `transform: none` in App.css, so nothing is CSS-mirrored either.)
  */
 function normalizedToCanvas(
     point,
     canvasWidth,
     canvasHeight,
     videoWidth,
-    videoHeight
+    videoHeight,
+    mirrored
 ) {
     if (!point) return null;
 
@@ -159,10 +153,14 @@ function normalizedToCanvas(
     const offsetY =
         (canvasHeight - renderedHeight) / 2;
 
+    const sourceX = mirrored
+        ? 1 - point.x
+        : point.x;
+
     return {
         x:
             offsetX +
-            point.x * renderedWidth,
+            sourceX * renderedWidth,
         y:
             offsetY +
             point.y * renderedHeight,
@@ -172,14 +170,16 @@ function normalizedToCanvas(
 function getCanvasPoint(
     point,
     canvas,
-    video
+    video,
+    mirrored
 ) {
     return normalizedToCanvas(
         point,
         canvas.clientWidth || canvas.width,
         canvas.clientHeight || canvas.height,
         video?.videoWidth || 0,
-        video?.videoHeight || 0
+        video?.videoHeight || 0,
+        mirrored
     );
 }
 
@@ -249,6 +249,7 @@ export default function AirCanvas({
     activeUserIdentity,
     tileIdentity,
     isController = false,
+    mirror = false,
     showOverlay = true,
 }) {
     const canvasTileIdentity =
@@ -487,7 +488,8 @@ export default function AirCanvas({
                     getCanvasPoint(
                         event.point,
                         canvas,
-                        video
+                        video,
+                        false
                     );
 
                 drawDot(
@@ -508,14 +510,16 @@ export default function AirCanvas({
                     getCanvasPoint(
                         event.from,
                         canvas,
-                        video
+                        video,
+                        false
                     );
 
                 const to =
                     getCanvasPoint(
                         event.to,
                         canvas,
-                        video
+                        video,
+                        false
                     );
 
                 drawLine(
@@ -756,31 +760,59 @@ export default function AirCanvas({
                 return;
             }
 
+            const rawPoint = {
+                x: Math.max(
+                    0,
+                    Math.min(
+                        1,
+                        landmarks[8].x
+                    )
+                ),
+                y: Math.max(
+                    0,
+                    Math.min(
+                        1,
+                        landmarks[8].y
+                    )
+                ),
+            };
+
             /*
-             * NO MIRRORING: this is exactly what MediaPipe reports for
-             * the fingertip landmark, clamped to the frame. It is used
-             * as-is for smoothing, history, the network payload, and
-             * every render of it (local, remote, and history replay).
+             * MIRROR-WRITING CORRECTION.
+             *
+             * MediaPipe reads the RAW, unmirrored camera feed (the
+             * hidden processing <video>, not the visible mirrored
+             * tile). But the writer is watching their OWN mirrored
+             * self-view while drawing, so they naturally move their
+             * real hand in the left-right mirror image of whatever
+             * they intend to write — the same reason people write
+             * backwards on a foggy mirror or a piece of glass. That
+             * means rawPoint.x, exactly as MediaPipe reports it, is
+             * already the mirror image of the intended shape.
+             *
+             * We flip x ONCE here, at the moment of capture, so that
+             * `canonicalPoint` is the correctly-oriented, legible
+             * coordinate. This is now the ONLY point value that ever
+             * goes into smoothing, history, and the network payload
+             * (event.point / event.from / event.to).
+             *
+             * Because the flip already happened here, NOTHING further
+             * down the pipeline — local drawing, remote drawing, or
+             * history replay — should apply any additional mirroring.
+             * Every getCanvasPoint(...) call below now passes `false`
+             * for that reason: the coordinate is already correct for
+             * everyone, writer included.
              */
-            const point = smoothPoint(
-                lastPointRef.current,
-                {
-                    x: Math.max(
-                        0,
-                        Math.min(
-                            1,
-                            landmarks[8].x
-                        )
-                    ),
-                    y: Math.max(
-                        0,
-                        Math.min(
-                            1,
-                            landmarks[8].y
-                        )
-                    ),
-                }
-            );
+            const canonicalPoint = {
+                x: 1 - rawPoint.x,
+                y: rawPoint.y,
+            };
+
+            const point =
+                smoothPoint(
+                    lastPointRef.current,
+                    canonicalPoint
+                );
 
             const width =
                 gesture === "ERASE"
@@ -796,7 +828,8 @@ export default function AirCanvas({
                 getCanvasPoint(
                     point,
                     canvas,
-                    video
+                    video,
+                    false
                 );
 
             if (
@@ -878,14 +911,16 @@ export default function AirCanvas({
                 getCanvasPoint(
                     event.from,
                     canvas,
-                    video
+                    video,
+                    false
                 );
 
             const to =
                 getCanvasPoint(
                     event.to,
                     canvas,
-                    video
+                    video,
+                    false
                 );
 
             drawLine(
@@ -1142,7 +1177,8 @@ export default function AirCanvas({
                         getCanvasPoint(
                             routedEvent.point,
                             canvas,
-                            video
+                            video,
+                            false
                         );
 
                     drawDot(
@@ -1156,14 +1192,16 @@ export default function AirCanvas({
                         getCanvasPoint(
                             routedEvent.from,
                             canvas,
-                            video
+                            video,
+                            false
                         );
 
                     const to =
                         getCanvasPoint(
                             routedEvent.to,
                             canvas,
-                            video
+                            video,
+                            false
                         );
 
                     drawLine(
@@ -1196,6 +1234,7 @@ export default function AirCanvas({
     }, [
         room,
         activeUserIdentity,
+        mirror,
     ]);
 
     /*
@@ -1441,6 +1480,7 @@ export default function AirCanvas({
         };
     }, [
         isController,
+        mirror,
     ]);
 
     /*
