@@ -303,16 +303,29 @@ export default function AirCanvas({
         reliable = false
     ) => {
         try {
+            const fullMessage = {
+                ...message,
+                sourceIdentity:
+                    room.localParticipant.identity,
+                targetIdentity:
+                    message.targetIdentity ||
+                    canvasTileIdentity,
+            };
+
+            /* [AC-SEND] Temporary diagnostic log — remove once the
+               drawing-propagation bug is confirmed fixed. */
+            console.log(
+                "[AC-SEND]",
+                fullMessage.event?.type,
+                "from",
+                fullMessage.sourceIdentity,
+                "target",
+                fullMessage.targetIdentity
+            );
+
             const payload =
                 new TextEncoder().encode(
-                    JSON.stringify({
-                        ...message,
-                        sourceIdentity:
-                            room.localParticipant.identity,
-                        targetIdentity:
-                            message.targetIdentity ||
-                            canvasTileIdentity,
-                    })
+                    JSON.stringify(fullMessage)
                 );
 
             await room.localParticipant.publishData(
@@ -913,6 +926,23 @@ export default function AirCanvas({
             _kind,
             topic
         ) => {
+            /* [AC-RECV] Temporary diagnostic log — remove once the
+               drawing-propagation bug is confirmed fixed. Fires for
+               EVERY DataReceived event on this room, regardless of
+               topic, so we can tell whether the packet is arriving
+               on this browser at all. */
+            console.log(
+                "[AC-RECV] raw",
+                {
+                    topic,
+                    from: sourceParticipant?.identity,
+                    myTile: canvasTileIdentity,
+                    showing:
+                        canvasRef.current
+                            ?.style.display,
+                }
+            );
+
             if (
                 topic !== TOPIC
             ) {
@@ -940,6 +970,19 @@ export default function AirCanvas({
                 if (!event) {
                     return;
                 }
+
+                /* [AC-RECV] Temporary diagnostic log — remove once
+                   the drawing-propagation bug is confirmed fixed. */
+                console.log(
+                    "[AC-RECV] parsed",
+                    event.type,
+                    "src",
+                    message.sourceIdentity,
+                    "eventTarget",
+                    event.targetIdentity,
+                    "myTile",
+                    canvasTileIdentity
+                );
 
                 /*
                  * CANVAS HISTORY SYNC
