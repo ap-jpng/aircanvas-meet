@@ -404,6 +404,21 @@ export default function AirCanvas({
      * drawn on it, so there is nothing anyone else could send back.
      */
     useEffect(() => {
+        /*
+         * Guard against the mount-time race where this effect can run
+         * before canvasTileIdentity (derived from hostIdentity /
+         * LiveKit participant metadata) has resolved yet. Without this
+         * guard we'd fire a history-request with targetIdentity: null,
+         * which nobody can ever answer — a wasted, silently-dropped
+         * packet. Because the effect's dependency array is
+         * [canvasTileIdentity], simply bailing out here is enough: the
+         * effect automatically re-runs and sends the CORRECT request
+         * the moment canvasTileIdentity resolves to a real identity.
+         */
+        if (!canvasTileIdentity) {
+            return;
+        }
+
         if (
             canvasTileIdentity ===
             room.localParticipant.identity
