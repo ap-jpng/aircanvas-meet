@@ -489,7 +489,7 @@ export default function AirCanvas({
                         event.point,
                         canvas,
                         video,
-                        mirror
+                        false
                     );
 
                 drawDot(
@@ -511,7 +511,7 @@ export default function AirCanvas({
                         event.from,
                         canvas,
                         video,
-                        mirror
+                        false
                     );
 
                 const to =
@@ -519,7 +519,7 @@ export default function AirCanvas({
                         event.to,
                         canvas,
                         video,
-                        mirror
+                        false
                     );
 
                 drawLine(
@@ -778,23 +778,40 @@ export default function AirCanvas({
             };
 
             /*
-             * IMPORTANT: rawPoint is the CANONICAL coordinate —
-             * exactly what MediaPipe reports, never flipped for the
-             * local selfie-camera mirror. This is the ONLY point value
-             * that ever goes into smoothing, history, and the network
-             * payload (event.point / event.from / event.to).
+             * MIRROR-WRITING CORRECTION.
              *
-             * Mirroring must be applied ONLY at the moment something
-             * is actually drawn to a specific <canvas>, via the
-             * `mirrored` argument to getCanvasPoint() below — never
-             * baked into the coordinate itself. That is what keeps
-             * local drawing, remote drawing, and history replay all
-             * consistent no matter who is mirrored on whose screen.
+             * MediaPipe reads the RAW, unmirrored camera feed (the
+             * hidden processing <video>, not the visible mirrored
+             * tile). But the writer is watching their OWN mirrored
+             * self-view while drawing, so they naturally move their
+             * real hand in the left-right mirror image of whatever
+             * they intend to write — the same reason people write
+             * backwards on a foggy mirror or a piece of glass. That
+             * means rawPoint.x, exactly as MediaPipe reports it, is
+             * already the mirror image of the intended shape.
+             *
+             * We flip x ONCE here, at the moment of capture, so that
+             * `canonicalPoint` is the correctly-oriented, legible
+             * coordinate. This is now the ONLY point value that ever
+             * goes into smoothing, history, and the network payload
+             * (event.point / event.from / event.to).
+             *
+             * Because the flip already happened here, NOTHING further
+             * down the pipeline — local drawing, remote drawing, or
+             * history replay — should apply any additional mirroring.
+             * Every getCanvasPoint(...) call below now passes `false`
+             * for that reason: the coordinate is already correct for
+             * everyone, writer included.
              */
+            const canonicalPoint = {
+                x: 1 - rawPoint.x,
+                y: rawPoint.y,
+            };
+
             const point =
                 smoothPoint(
                     lastPointRef.current,
-                    rawPoint
+                    canonicalPoint
                 );
 
             const width =
@@ -812,7 +829,7 @@ export default function AirCanvas({
                     point,
                     canvas,
                     video,
-                    mirror
+                    false
                 );
 
             if (
@@ -895,7 +912,7 @@ export default function AirCanvas({
                     event.from,
                     canvas,
                     video,
-                    mirror
+                    false
                 );
 
             const to =
@@ -903,7 +920,7 @@ export default function AirCanvas({
                     event.to,
                     canvas,
                     video,
-                    mirror
+                    false
                 );
 
             drawLine(
