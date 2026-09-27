@@ -66,125 +66,6 @@ function MeetingRoom({
 }) {
     const room = useRoomContext();
 
-    /* =====================================================
-       TEMP DIAGNOSTIC — room/window level listeners
-       (remove this whole block once the "exited after chat"
-       bug is found)
-    ===================================================== */
-
-    useEffect(() => {
-        const logState = () => {
-            console.warn(
-                "[DIAGNOSTIC][ConnectionStateChanged]",
-                room.state,
-                "at:",
-                new Date().toISOString()
-            );
-        };
-
-        const logReconnecting = () => {
-            console.warn(
-                "[DIAGNOSTIC][Reconnecting]",
-                "at:",
-                new Date().toISOString()
-            );
-        };
-
-        const logSignalReconnecting = () => {
-            console.warn(
-                "[DIAGNOSTIC][SignalReconnecting]",
-                "at:",
-                new Date().toISOString()
-            );
-        };
-
-        const logDisconnected = (
-            reason
-        ) => {
-            console.warn(
-                "[DIAGNOSTIC][DISCONNECTED]",
-                "reason code:",
-                reason,
-                "reason name:",
-                DisconnectReason[reason] ||
-                    "UNKNOWN",
-                "at:",
-                new Date().toISOString()
-            );
-        };
-
-        const logWindowError = (event) => {
-            console.error(
-                "[DIAGNOSTIC][window error]",
-                event.message,
-                event.error
-            );
-        };
-
-        const logUnhandledRejection = (
-            event
-        ) => {
-            console.error(
-                "[DIAGNOSTIC][unhandled rejection]",
-                event.reason
-            );
-        };
-
-        room.on(
-            RoomEvent.ConnectionStateChanged,
-            logState
-        );
-        room.on(
-            RoomEvent.Reconnecting,
-            logReconnecting
-        );
-        room.on(
-            RoomEvent.SignalReconnecting,
-            logSignalReconnecting
-        );
-        room.on(
-            RoomEvent.Disconnected,
-            logDisconnected
-        );
-
-        window.addEventListener(
-            "error",
-            logWindowError
-        );
-        window.addEventListener(
-            "unhandledrejection",
-            logUnhandledRejection
-        );
-
-        return () => {
-            room.off(
-                RoomEvent.ConnectionStateChanged,
-                logState
-            );
-            room.off(
-                RoomEvent.Reconnecting,
-                logReconnecting
-            );
-            room.off(
-                RoomEvent.SignalReconnecting,
-                logSignalReconnecting
-            );
-            room.off(
-                RoomEvent.Disconnected,
-                logDisconnected
-            );
-
-            window.removeEventListener(
-                "error",
-                logWindowError
-            );
-            window.removeEventListener(
-                "unhandledrejection",
-                logUnhandledRejection
-            );
-        };
-    }, [room]);
-
     const participants =
         useParticipants();
 
@@ -2203,6 +2084,18 @@ function App() {
 
     const handleDisconnected =
         (reason) => {
+            // TEMP DIAGNOSTIC — remove once the "exited after chat" bug is found
+            console.warn(
+                "[DIAGNOSTIC][DISCONNECTED]",
+                "reason code:",
+                reason,
+                "reason name:",
+                DisconnectReason[reason] ||
+                    "UNKNOWN",
+                "at:",
+                new Date().toISOString()
+            );
+
             console.warn(
                 "LIVEKIT DISCONNECTED:",
                 reason
@@ -2212,6 +2105,102 @@ function App() {
                 "Disconnected"
             );
         };
+
+    /* =====================================================
+       TEMP DIAGNOSTIC — room/window level listeners
+       (remove this whole block once the "exited after chat"
+       bug is found)
+    ===================================================== */
+
+    useEffect(() => {
+        const logState = () => {
+            console.warn(
+                "[DIAGNOSTIC][ConnectionStateChanged]",
+                room.state,
+                "at:",
+                new Date().toISOString()
+            );
+        };
+
+        const logReconnecting = () => {
+            console.warn(
+                "[DIAGNOSTIC][Reconnecting]",
+                "at:",
+                new Date().toISOString()
+            );
+        };
+
+        const logSignalReconnecting = () => {
+            console.warn(
+                "[DIAGNOSTIC][SignalReconnecting]",
+                "at:",
+                new Date().toISOString()
+            );
+        };
+
+        const logWindowError = (event) => {
+            console.error(
+                "[DIAGNOSTIC][window error]",
+                event.message,
+                event.error
+            );
+        };
+
+        const logUnhandledRejection = (
+            event
+        ) => {
+            console.error(
+                "[DIAGNOSTIC][unhandled rejection]",
+                event.reason
+            );
+        };
+
+        room.on(
+            RoomEvent.ConnectionStateChanged,
+            logState
+        );
+        room.on(
+            RoomEvent.Reconnecting,
+            logReconnecting
+        );
+        room.on(
+            RoomEvent.SignalReconnecting,
+            logSignalReconnecting
+        );
+
+        window.addEventListener(
+            "error",
+            logWindowError
+        );
+        window.addEventListener(
+            "unhandledrejection",
+            logUnhandledRejection
+        );
+
+        return () => {
+            room.off(
+                RoomEvent.ConnectionStateChanged,
+                logState
+            );
+            room.off(
+                RoomEvent.Reconnecting,
+                logReconnecting
+            );
+            room.off(
+                RoomEvent.SignalReconnecting,
+                logSignalReconnecting
+            );
+
+            window.removeEventListener(
+                "error",
+                logWindowError
+            );
+            window.removeEventListener(
+                "unhandledrejection",
+                logUnhandledRejection
+            );
+        };
+    }, [room]);
 
     /* =====================================================
        LEAVE
