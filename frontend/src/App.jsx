@@ -93,6 +93,27 @@ function MeetingRoom({
     const [screenSharing, setScreenSharing] =
         useState(false);
 
+    /*
+     * The writer's chosen AirCanvas marker color/size. Passed straight
+     * through to every <AirCanvas> instance below — only the instance
+     * that is currently this browser's controller ever actually reads
+     * them (see the matching comment in AirCanvas.jsx), so handing them
+     * to every tile unconditionally is harmless.
+     */
+    const [markerColor, setMarkerColor] =
+        useState("#00ff66");
+
+    const [markerWidth, setMarkerWidth] =
+        useState(4);
+
+    const MARKER_COLOR_PRESETS = [
+        "#00ff66",
+        "#25d3ee",
+        "#ff4d6d",
+        "#ffd23f",
+        "#ffffff",
+    ];
+
     const [
         airCanvasAllowed,
         setAirCanvasAllowed,
@@ -163,6 +184,22 @@ function MeetingRoom({
      */
     const airCanvasUser =
         explicitAirCanvasWriter || hostIdentity;
+
+    /*
+     * Whether the LOCAL browser is currently the one allowed to draw
+     * (on its own tile), regardless of which tile is being displayed
+     * where. Mirrors the per-tile `isController` expression used below
+     * for the tile that happens to match this browser's own identity.
+     * Used only to decide whether to show the marker color/size
+     * controls — it doesn't change who can draw.
+     */
+    const isLocalController =
+        isHost ||
+        (
+            airCanvasAllowed &&
+            airCanvasUser ===
+                room.localParticipant.identity
+        );
 
     /*
      * The host always has AirCanvas permission. This no longer needs
@@ -892,6 +929,12 @@ function MeetingRoom({
                                                     track.participant.identity ===
                                                     airCanvasUser
                                                 }
+                                                markerColor={
+                                                    markerColor
+                                                }
+                                                markerWidth={
+                                                    markerWidth
+                                                }
                                             />
                                         }
 
@@ -1099,6 +1142,172 @@ function MeetingRoom({
                                         "#dce3ee",
                                 }}
                             >
+
+                                {isLocalController && (
+                                    <div
+                                        style={{
+                                            padding:
+                                                "14px",
+                                            borderRadius:
+                                                "10px",
+                                            background:
+                                                "#151f31",
+                                            marginBottom:
+                                                "15px",
+                                        }}
+                                    >
+                                        <strong>
+                                            Marker
+                                        </strong>
+
+                                        <p
+                                            style={{
+                                                margin:
+                                                    "4px 0 10px",
+                                                color:
+                                                    "#8995a9",
+                                                fontSize:
+                                                    "12px",
+                                            }}
+                                        >
+                                            Choose the
+                                            color and
+                                            size of your
+                                            AirCanvas
+                                            marker.
+                                        </p>
+
+                                        <div
+                                            style={{
+                                                display:
+                                                    "flex",
+                                                alignItems:
+                                                    "center",
+                                                gap:
+                                                    "8px",
+                                                marginBottom:
+                                                    "12px",
+                                            }}
+                                        >
+                                            {MARKER_COLOR_PRESETS.map(
+                                                (
+                                                    preset
+                                                ) => (
+                                                    <button
+                                                        key={
+                                                            preset
+                                                        }
+                                                        type="button"
+                                                        onClick={() =>
+                                                            setMarkerColor(
+                                                                preset
+                                                            )
+                                                        }
+                                                        title={
+                                                            preset
+                                                        }
+                                                        style={{
+                                                            width: "26px",
+                                                            height: "26px",
+                                                            borderRadius: "50%",
+                                                            cursor: "pointer",
+                                                            background:
+                                                                preset,
+                                                            border:
+                                                                markerColor ===
+                                                                preset
+                                                                    ? "2px solid #ffffff"
+                                                                    : "2px solid rgba(255,255,255,0.15)",
+                                                            boxShadow:
+                                                                markerColor ===
+                                                                preset
+                                                                    ? "0 0 0 2px rgba(37,211,238,0.5)"
+                                                                    : "none",
+                                                        }}
+                                                    />
+                                                )
+                                            )}
+
+                                            <input
+                                                type="color"
+                                                value={
+                                                    markerColor
+                                                }
+                                                onChange={(
+                                                    event
+                                                ) =>
+                                                    setMarkerColor(
+                                                        event
+                                                            .target
+                                                            .value
+                                                    )
+                                                }
+                                                title="Custom color"
+                                                style={{
+                                                    width: "26px",
+                                                    height: "26px",
+                                                    padding: 0,
+                                                    border: "none",
+                                                    borderRadius: "50%",
+                                                    background: "transparent",
+                                                    cursor: "pointer",
+                                                }}
+                                            />
+                                        </div>
+
+                                        <label
+                                            style={{
+                                                display:
+                                                    "flex",
+                                                justifyContent:
+                                                    "space-between",
+                                                color:
+                                                    "#d6dce7",
+                                                fontSize:
+                                                    "12px",
+                                                fontWeight: 600,
+                                                marginBottom:
+                                                    "4px",
+                                            }}
+                                        >
+                                            <span>
+                                                Marker
+                                                size
+                                            </span>
+
+                                            <span>
+                                                {
+                                                    markerWidth
+                                                }
+                                                px
+                                            </span>
+                                        </label>
+
+                                        <input
+                                            type="range"
+                                            min="2"
+                                            max="14"
+                                            step="1"
+                                            value={
+                                                markerWidth
+                                            }
+                                            onChange={(
+                                                event
+                                            ) =>
+                                                setMarkerWidth(
+                                                    Number(
+                                                        event
+                                                            .target
+                                                            .value
+                                                    )
+                                                )
+                                            }
+                                            style={{
+                                                width: "100%",
+                                            }}
+                                        />
+                                    </div>
+                                )}
 
                                 {isHost ? (
                                     <>
