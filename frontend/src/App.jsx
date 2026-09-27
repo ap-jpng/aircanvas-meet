@@ -82,6 +82,7 @@ function MeetingRoom({
     isHost,
     initialMicEnabled,
     initialCameraEnabled,
+    participantName,
 }) {
     const room = useRoomContext();
 
@@ -290,22 +291,66 @@ function MeetingRoom({
     const parseParticipantMetadata =
         (participant) => {
             try {
-                return JSON.parse(
-                    participant.metadata ||
+                const parsed = JSON.parse(
+                    participant?.metadata ||
                         "{}"
                 );
+
+                return parsed &&
+                    typeof parsed === "object"
+                    ? parsed
+                    : {};
             } catch {
                 return {};
             }
         };
+
+    /*
+     * Attendance/name safety helper.
+     *
+     * LiveKit participant metadata can contain values of different
+     * types. In particular, a broken/old token can contain
+     * { name: false }. Never allow a boolean, number, object, or
+     * empty string to reach the UI/PDF as a participant name.
+     */
+    const getSafeName = (
+        metadataName,
+        liveParticipantName,
+        fallbackIdentity,
+        explicitName = ""
+    ) => {
+        const candidates = [
+            explicitName,
+            metadataName,
+            liveParticipantName,
+            fallbackIdentity,
+        ];
+
+        for (const candidate of candidates) {
+            if (
+                typeof candidate === "string" &&
+                candidate.trim()
+            ) {
+                return candidate.trim();
+            }
+        }
+
+        return "Participant";
+    };
 
     /* =====================================================
        PARTICIPANT NAME
     ===================================================== */
 
     const localName =
-        room.localParticipant.name ||
-        "Participant";
+        getSafeName(
+            parseParticipantMetadata(
+                room.localParticipant
+            ).name,
+            room.localParticipant.name,
+            room.localParticipant.identity,
+            participantName
+        );
 
     /* =====================================================
        AIR CANVAS DATA EVENTS
@@ -1088,9 +1133,15 @@ function MeetingRoom({
                 {
                     identity,
                     name:
-                        metadata.name ||
-                        participant.name ||
-                        identity,
+                        getSafeName(
+                            metadata.name,
+                            participant.name,
+                            identity,
+                            participant.identity ===
+                                room.localParticipant.identity
+                                ? participantName
+                                : ""
+                        ),
                     email:
                         metadata.email ||
                         existing?.email ||
@@ -1154,7 +1205,10 @@ function MeetingRoom({
                 recordLeave
             );
         };
-    }, [room]);
+    }, [
+        room,
+        participantName,
+    ]);
 
     /*
      * A participant's real name (and, sometimes, their metadata)
@@ -1183,9 +1237,19 @@ function MeetingRoom({
                         participant
                     );
 
+                const isLocalParticipant =
+                    participant.identity ===
+                    room.localParticipant.identity;
+
                 const freshName =
-                    metadata.name ||
-                    participant.name;
+                    getSafeName(
+                        metadata.name,
+                        participant.name,
+                        participant.identity,
+                        isLocalParticipant
+                            ? participantName
+                            : record.name
+                    );
 
                 if (freshName) {
                     record.name = freshName;
@@ -1200,7 +1264,10 @@ function MeetingRoom({
                 }
             }
         );
-    }, [participants]);
+    }, [
+        participants,
+        participantName,
+    ]);
 
     /* =====================================================
        GENERATE ATTENDANCE REPORT (PDF, host only)
@@ -1295,13 +1362,24 @@ function MeetingRoom({
                               )
                             : {};
 
+                    const isHostRecord =
+                        record.identity ===
+                        hostIdentity;
+
+                    const isLocalRecord =
+                        record.identity ===
+                        room.localParticipant.identity;
+
                     const resolvedName =
-                      record.identity === hostIdentity
-                        liveMetadata.name ||
-                        liveParticipant?.name ||
-                        record.name ||
-                        record.identity ||
-                        "Participant";
+                        getSafeName(
+                            liveMetadata.name,
+                            liveParticipant?.name,
+                            record.identity,
+                            isHostRecord ||
+                                isLocalRecord
+                                ? participantName
+                                : record.name
+                        );
 
                     return {
                         ...record,
@@ -3535,6 +3613,9 @@ function App() {
                         }
                         initialCameraEnabled={
                             initialCameraEnabled
+                        }
+                        participantName={
+                            participantName
                         }
                     />
                 </LiveKitRoom>
