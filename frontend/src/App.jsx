@@ -1296,11 +1296,12 @@ function MeetingRoom({
                             : {};
 
                     const resolvedName =
+                      record.identity === hostIdentity
                         liveMetadata.name ||
                         liveParticipant?.name ||
                         record.name ||
                         record.identity ||
-                        "Unknown participant";
+                        "Participant";
 
                     return {
                         ...record,
