@@ -183,12 +183,20 @@ function getCanvasPoint(
     );
 }
 
+/*
+ * `color` is new: both draw helpers now accept an explicit stroke/fill
+ * color instead of the old hardcoded "#00ff66". Falling back to
+ * "#00ff66" when color is missing keeps old history entries (drawn
+ * before this feature existed, with no `color` field) rendering
+ * exactly as they always did.
+ */
 function drawLine(
     ctx,
     from,
     to,
     mode,
-    width
+    width,
+    color
 ) {
     if (!from || !to) return;
 
@@ -204,7 +212,7 @@ function drawLine(
     } else {
         ctx.globalCompositeOperation =
             "source-over";
-        ctx.strokeStyle = "#00ff66";
+        ctx.strokeStyle = color || "#00ff66";
     }
 
     ctx.beginPath();
@@ -219,7 +227,8 @@ function drawDot(
     ctx,
     point,
     mode,
-    width
+    width,
+    color
 ) {
     if (!point) return;
 
@@ -230,7 +239,7 @@ function drawDot(
             ? "destination-out"
             : "source-over";
 
-    ctx.fillStyle = "#00ff66";
+    ctx.fillStyle = color || "#00ff66";
 
     ctx.beginPath();
     ctx.arc(
@@ -251,6 +260,18 @@ export default function AirCanvas({
     isController = false,
     mirror = false,
     showOverlay = true,
+    /*
+     * NEW: the writer's chosen marker color/size. Only meaningful on
+     * the instance where isController is true — that's the only place
+     * that ever calls processGesture and therefore the only place
+     * that ever originates a NEW stroke. Every other instance (other
+     * tiles, other participants' browsers) only ever replays events
+     * it received or read from history, and those events now carry
+     * their own `color`/`width`, so they render correctly regardless
+     * of what this prop happens to be set to locally.
+     */
+    markerColor = "#00ff66",
+    markerWidth = 4,
 }) {
     const canvasTileIdentity =
         tileIdentity || activeUserIdentity;
@@ -297,6 +318,29 @@ export default function AirCanvas({
 
     const mountedRef =
         useRef(true);
+
+    /*
+     * processGesture is invoked from inside a MediaPipe callback that
+     * was registered once (see the "Load legacy MediaPipe Hands"
+     * effect below) and is not re-created every time markerColor/
+     * markerWidth change. Reading them through a ref (kept fresh by
+     * the two tiny effects right below) means changing the color or
+     * size mid-meeting takes effect on the very next frame, with no
+     * need to tear down and reinitialize MediaPipe.
+     */
+    const markerColorRef =
+        useRef(markerColor);
+
+    const markerWidthRef =
+        useRef(markerWidth);
+
+    useEffect(() => {
+        markerColorRef.current = markerColor;
+    }, [markerColor]);
+
+    useEffect(() => {
+        markerWidthRef.current = markerWidth;
+    }, [markerWidth]);
 
     const send = async (
         message,
@@ -496,7 +540,8 @@ export default function AirCanvas({
                     ctx,
                     point,
                     event.mode,
-                    event.width
+                    event.width,
+                    event.color
                 );
 
                 continue;
@@ -527,7 +572,8 @@ export default function AirCanvas({
                     from,
                     to,
                     event.mode,
-                    event.width
+                    event.width,
+                    event.color
                 );
             }
         }
@@ -836,10 +882,21 @@ export default function AirCanvas({
                     canonicalPoint
                 );
 
+            /*
+             * NEW: width/color now come from the writer's current
+             * choice (via the refs kept fresh above) instead of a
+             * hardcoded "4" / "#00ff66". ERASE keeps its own fixed,
+             * separately-tuned width — the "marker size" control is
+             * only meant to affect the DRAW marker, not the eraser
+             * footprint, so eraser feel is completely unchanged.
+             */
             const width =
                 gesture === "ERASE"
                     ? 68
-                    : 4;
+                    : markerWidthRef.current;
+
+            const color =
+                markerColorRef.current;
 
             const ctx =
                 canvas.getContext(
@@ -869,7 +926,8 @@ export default function AirCanvas({
                     ctx,
                     canvasPoint,
                     gesture,
-                    width
+                    width,
+                    color
                 );
 
                 const event = {
@@ -877,6 +935,7 @@ export default function AirCanvas({
                     mode: gesture,
                     point,
                     width,
+                    color,
                     targetIdentity: canvasTileIdentity,
                 };
 
@@ -926,6 +985,7 @@ export default function AirCanvas({
                     lastPointRef.current,
                 to: point,
                 width,
+                color,
                 targetIdentity: canvasTileIdentity,
             };
 
@@ -950,7 +1010,8 @@ export default function AirCanvas({
                 from,
                 to,
                 gesture,
-                width
+                width,
+                color
             );
 
             addEvent(event);
@@ -1207,7 +1268,8 @@ export default function AirCanvas({
                         ctx,
                         point,
                         routedEvent.mode,
-                        routedEvent.width
+                        routedEvent.width,
+                        routedEvent.color
                     );
                 } else {
                     const from =
@@ -1231,7 +1293,8 @@ export default function AirCanvas({
                         from,
                         to,
                         routedEvent.mode,
-                        routedEvent.width
+                        routedEvent.width,
+                        routedEvent.color
                     );
                 }
             } catch (error) {

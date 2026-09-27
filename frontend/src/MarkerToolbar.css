@@ -1,0 +1,126 @@
+.marker-toolbar {
+    position: absolute;
+    left: 12px;
+    bottom: 12px;
+    z-index: 30;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 8px 12px;
+    border-radius: 14px;
+    background: rgba(18, 18, 22, 0.72);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    pointer-events: auto;
+    user-select: none;
+}
+
+/* Left side of the panel: the three color buttons */
+.marker-toolbar__colors {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.marker-toolbar__color-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 9px 5px 6px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.04);
+    color: #e8e8ec;
+    font-size: 12px;
+    line-height: 1;
+    text-transform: capitalize;
+    cursor: pointer;
+    transition: background 120ms ease, border-color 120ms ease;
+}
+
+.marker-toolbar__color-btn:hover {
+    background: rgba(255, 255, 255, 0.09);
+}
+
+.marker-toolbar__color-btn--active {
+    border-color: var(--btn-color);
+    background: rgba(255, 255, 255, 0.12);
+}
+
+.marker-toolbar__color-swatch {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--btn-color);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.2) inset;
+    flex-shrink: 0;
+}
+
+.marker-toolbar__divider {
+    width: 1px;
+    height: 24px;
+    background: rgba(255, 255, 255, 0.14);
+    flex-shrink: 0;
+}
+
+/* Right side of the panel: size adjustment */
+.marker-toolbar__size {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+.marker-toolbar__size-label {
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.6);
+}
+
+.marker-toolbar__size-track {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 84px;
+    height: 3px;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.22);
+    outline: none;
+    cursor: pointer;
+}
+
+.marker-toolbar__size-track::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #f2f2f4;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+    cursor: pointer;
+}
+
+.marker-toolbar__size-track::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border: none;
+    border-radius: 50%;
+    background: #f2f2f4;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+    cursor: pointer;
+}
+
+.marker-toolbar__preview {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    flex-shrink: 0;
+}
+
+.marker-toolbar__preview-dot {
+    border-radius: 50%;
+    transition: width 80ms ease, height 80ms ease, background-color 80ms ease;
+}
