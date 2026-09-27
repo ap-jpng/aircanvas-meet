@@ -956,6 +956,7 @@ body[data-theme="light"] .control-badge-dot {
 .controls-right {
     display: flex;
     align-items: center;
+    gap: 10px;
 }
 
 .leave-button {
@@ -975,6 +976,122 @@ body[data-theme="light"] .control-badge-dot {
 
 .leave-button:hover {
     background: #ef4354;
+}
+
+/*
+ * END MEETING (host-only). Kept visually distinct from Leave
+ * (outlined, not solid red) so the host doesn't confuse "leave
+ * the call myself" with "end it for everyone".
+ */
+.end-meeting-button {
+    height: 45px;
+    padding: 0 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid #7f2934;
+    border-radius: 9px;
+    background: transparent;
+    color: #ff9b9b;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.end-meeting-button:hover {
+    background: rgba(220, 53, 69, 0.12);
+}
+
+/* =========================================================
+   CONFIRM / NOTICE OVERLAY
+   Used for the host's "End meeting for everyone?" confirmation
+   and the "Meeting ended" notice shown to everyone else. Sits
+   above the whole meeting screen, same pattern as .aircanvas-overlay
+   further down.
+========================================================= */
+
+.confirm-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 2000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background: rgba(3, 7, 14, 0.72);
+    backdrop-filter: blur(4px);
+}
+
+.confirm-dialog {
+    width: min(420px, 100%);
+    padding: 26px;
+    border-radius: 16px;
+    background: #11182a;
+    border: 1px solid #33415b;
+    box-shadow: 0 30px 90px rgba(0, 0, 0, 0.5);
+    text-align: center;
+}
+
+.confirm-dialog h3 {
+    margin: 0 0 10px;
+    font-size: 18px;
+    color: #f5f7fb;
+}
+
+.confirm-dialog p {
+    margin: 0 0 20px;
+    color: #9da8ba;
+    font-size: 13px;
+    line-height: 1.6;
+}
+
+.confirm-dialog-actions {
+    display: flex;
+    gap: 10px;
+}
+
+.confirm-dialog-actions .secondary-button,
+.confirm-dialog-actions .danger-button {
+    width: auto;
+    flex: 1;
+    height: 46px;
+}
+
+.danger-button {
+    border: none;
+    border-radius: 10px;
+    background: #dc3545;
+    color: white;
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.danger-button:hover {
+    background: #ef4354;
+}
+
+body[data-theme="light"] .confirm-dialog {
+    background: #ffffff;
+    border-color: #dde3ee;
+}
+
+body[data-theme="light"] .confirm-dialog h3 {
+    color: #16202f;
+}
+
+body[data-theme="light"] .confirm-dialog p {
+    color: #5b6576;
+}
+
+body[data-theme="light"] .end-meeting-button {
+    border-color: #e5b9be;
+    background: #fff5f6;
+    color: #b3202f;
+}
+
+body[data-theme="light"] .end-meeting-button:hover {
+    background: #fde8ea;
 }
 
 /* =========================================================
@@ -1131,6 +1248,7 @@ body[data-theme="light"] .control-badge-dot {
         flex: 0 0 auto;
         display: flex;
         align-items: center;
+        gap: 4px;
     }
 
     .leave-button {
@@ -1141,6 +1259,17 @@ body[data-theme="light"] .control-badge-dot {
         justify-content: center;
         gap: 2px;
         font-size: 7.5px;
+        border-radius: 9px;
+    }
+
+    .end-meeting-button {
+        width: 48px;
+        height: 56px;
+        padding: 0;
+        flex-direction: column;
+        justify-content: center;
+        gap: 2px;
+        font-size: 7px;
         border-radius: 9px;
     }
 

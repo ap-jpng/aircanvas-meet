@@ -32,11 +32,14 @@ const AIR_CANVAS_TOPIC =
 const REACTION_TOPIC =
     "aircanvas-reaction";
 
+const MEETING_CONTROL_TOPIC =
+    "aircanvas-meeting-control";
+
 /* =========================================================
    DATA HELPERS
 ========================================================= */
 
-function sendAirCanvasMessage(room, message) {
+function sendDataMessage(room, message, topic) {
     try {
         const data = new TextEncoder().encode(
             JSON.stringify(message)
@@ -46,15 +49,19 @@ function sendAirCanvasMessage(room, message) {
             data,
             {
                 reliable: true,
-                topic: AIR_CANVAS_TOPIC,
+                topic,
             }
         );
     } catch (error) {
         console.error(
-            "AirCanvas data error:",
+            "Data message error:",
             error
         );
     }
+}
+
+function sendAirCanvasMessage(room, message) {
+    sendDataMessage(room, message, AIR_CANVAS_TOPIC);
 }
 
 /* =========================================================
@@ -136,6 +143,24 @@ function MeetingRoom({
 
     const [reactions, setReactions] =
         useState([]);
+
+    /*
+     * END MEETING (host-only "End meeting for everyone").
+     * showEndMeetingConfirm gates the confirmation dialog the host
+     * sees before the broadcast goes out. meetingEndedNotice is shown
+     * on every OTHER participant's screen the moment the host's
+     * "meeting-ended" message arrives, right before that client
+     * disconnects itself.
+     */
+    const [
+        showEndMeetingConfirm,
+        setShowEndMeetingConfirm,
+    ] = useState(false);
+
+    const [
+        meetingEndedNotice,
+        setMeetingEndedNotice,
+    ] = useState(false);
 
     const MARKER_COLOR_PRESETS = [
         "#00ff66",
@@ -869,6 +894,139 @@ function MeetingRoom({
         };
 
     /* =====================================================
+       END MEETING FOR EVERYONE (host only)
+       Broadcasts a "meeting-ended" control message so every other
+       participant's client shows the notice below and disconnects
+       itself, then (best-effort) asks the backend to close the
+       LiveKit room server-side so the meeting ID can't be rejoined,
+       and finally disconnects the host too.
+    ===================================================== */
+
+    const endMeetingForAll =
+        async () => {
+            if (!isHost) {
+                return;
+            }
+
+            setShowEndMeetingConfirm(
+                false
+            );
+
+            sendDataMessage(
+                room,
+                {
+                    type:
+                        "meeting-ended",
+                },
+                MEETING_CONTROL_TOPIC
+            );
+
+            try {
+                const hostToken =
+                    sessionStorage.getItem(
+                        `aircanvas-host-${roomId}`
+                    );
+
+                await fetch(
+                    `${BACKEND_URL}/api/meeting/end`,
+                    {
+                        method: "POST",
+                        headers: {
+                            "Content-Type":
+                                "application/json",
+                        },
+                        body: JSON.stringify(
+                            {
+                                roomId,
+                                hostToken,
+                            }
+                        ),
+                    }
+                );
+            } catch (error) {
+                /*
+                 * Non-fatal: even if the backend doesn't expose this
+                 * endpoint (yet) or the request fails, every other
+                 * participant has already been told to leave via the
+                 * broadcast above, and the host still disconnects
+                 * below.
+                 */
+                console.error(
+                    "End meeting backend error:",
+                    error
+                );
+            }
+
+            /*
+             * Small delay so the reliable data message above has a
+             * moment to actually go out over the wire before this
+             * client tears its own connection down.
+             */
+            window.setTimeout(() => {
+                handleLeave();
+            }, 300);
+        };
+
+    /* =====================================================
+       LISTEN FOR "MEETING ENDED" (all participants)
+    ===================================================== */
+
+    useEffect(() => {
+        const handleMeetingControl = (
+            payload,
+            participant,
+            _kind,
+            topic
+        ) => {
+            if (
+                topic !==
+                MEETING_CONTROL_TOPIC
+            ) {
+                return;
+            }
+
+            try {
+                const message =
+                    JSON.parse(
+                        new TextDecoder().decode(
+                            payload
+                        )
+                    );
+
+                if (
+                    message.type ===
+                    "meeting-ended"
+                ) {
+                    setMeetingEndedNotice(
+                        true
+                    );
+
+                    window.setTimeout(() => {
+                        handleLeave();
+                    }, 1800);
+                }
+            } catch (error) {
+                console.error(
+                    "Meeting control message error:",
+                    error
+                );
+            }
+        };
+
+        room.on(
+            RoomEvent.DataReceived,
+            handleMeetingControl
+        );
+
+        return () => {
+            room.off(
+                RoomEvent.DataReceived,
+                handleMeetingControl
+            );
+        };
+    }, [room]);
+
+    /* =====================================================
        SHARE CURRENT MEETING
     ===================================================== */
 
@@ -954,6 +1112,64 @@ function MeetingRoom({
         <div className="meeting-room">
 
             <ThemeToggle />
+
+            {/* END MEETING CONFIRMATION (host) */}
+
+            {showEndMeetingConfirm && (
+                <div className="confirm-overlay">
+                    <div className="confirm-dialog">
+                        <h3>
+                            End meeting for everyone?
+                        </h3>
+
+                        <p>
+                            Every participant will be
+                            disconnected immediately.
+                            This can't be undone.
+                        </p>
+
+                        <div className="confirm-dialog-actions">
+                            <button
+                                className="secondary-button"
+                                onClick={() =>
+                                    setShowEndMeetingConfirm(
+                                        false
+                                    )
+                                }
+                            >
+                                Cancel
+                            </button>
+
+                            <button
+                                className="danger-button"
+                                onClick={
+                                    endMeetingForAll
+                                }
+                            >
+                                End Meeting
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* MEETING ENDED NOTICE (everyone else) */}
+
+            {meetingEndedNotice && (
+                <div className="confirm-overlay">
+                    <div className="confirm-dialog">
+                        <h3>
+                            Meeting ended
+                        </h3>
+
+                        <p>
+                            The host ended this
+                            meeting for everyone.
+                            You're being disconnected...
+                        </p>
+                    </div>
+                </div>
+            )}
 
             {/* HEADER */}
 
@@ -1899,6 +2115,27 @@ function MeetingRoom({
                 </div>
 
                 <div className="controls-right">
+
+                    {isHost && (
+                        <button
+                            type="button"
+                            className="end-meeting-button"
+                            onClick={() =>
+                                setShowEndMeetingConfirm(
+                                    true
+                                )
+                            }
+                            title="End meeting for everyone"
+                        >
+                            <span>
+                                ⏹
+                            </span>
+
+                            <span>
+                                End Meeting
+                            </span>
+                        </button>
+                    )}
 
                     <button
                         className="leave-button"
