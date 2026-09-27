@@ -23,6 +23,13 @@ import "@livekit/components-styles";
 import "./App.css";
 import AirCanvas from "./AirCanvas";
 
+/*
+ * ATTENDANCE REPORT (PDF).
+ * Requires: npm install jspdf jspdf-autotable
+ */
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
+
 const BACKEND_URL =
    "https://aircanvas-meet.onrender.com";
 
@@ -268,6 +275,29 @@ function MeetingRoom({
         pendingRequest,
         setPendingRequest,
     ] = useState(null);
+
+    /*
+     * ATTENDANCE REPORT.
+     * identity -> { identity, name, email, joinedAt, leftAt }.
+     * A ref (not state) because it's only ever read at the moment
+     * the host clicks "Attendance Report" — it doesn't need to
+     * trigger re-renders as participants come and go.
+     */
+    const attendanceLogRef = useRef(
+        new Map()
+    );
+
+    const parseParticipantMetadata =
+        (participant) => {
+            try {
+                return JSON.parse(
+                    participant.metadata ||
+                        "{}"
+                );
+            } catch {
+                return {};
+            }
+        };
 
     /* =====================================================
        PARTICIPANT NAME
@@ -1025,6 +1055,247 @@ function MeetingRoom({
             );
         };
     }, [room]);
+
+    /* =====================================================
+       ATTENDANCE TRACKING
+       Records a join/leave row per participant (host included).
+       Seeds from whoever is already in the room the moment this
+       mounts (using LiveKit's own participant.joinedAt so an
+       existing participant's time is accurate, not "now"), then
+       keeps the log updated as people come and go for the rest
+       of the meeting.
+    ===================================================== */
+
+    useEffect(() => {
+        const recordJoin = (
+            participant
+        ) => {
+            const metadata =
+                parseParticipantMetadata(
+                    participant
+                );
+
+            const identity =
+                participant.identity;
+
+            const existing =
+                attendanceLogRef.current.get(
+                    identity
+                );
+
+            attendanceLogRef.current.set(
+                identity,
+                {
+                    identity,
+                    name:
+                        metadata.name ||
+                        participant.name ||
+                        identity,
+                    email:
+                        metadata.email ||
+                        existing?.email ||
+                        "",
+                    joinedAt:
+                        participant.joinedAt
+                            ? new Date(
+                                  participant.joinedAt
+                              )
+                            : existing?.joinedAt ||
+                              new Date(),
+                    leftAt: null,
+                }
+            );
+        };
+
+        const recordLeave = (
+            participant
+        ) => {
+            const record =
+                attendanceLogRef.current.get(
+                    participant.identity
+                );
+
+            if (record && !record.leftAt) {
+                record.leftAt = new Date();
+            }
+        };
+
+        /*
+         * Seed with everyone already connected (host's own local
+         * participant plus any remote participants who joined
+         * before this listener was attached).
+         */
+        recordJoin(room.localParticipant);
+
+        room.remoteParticipants.forEach(
+            (participant) => {
+                recordJoin(participant);
+            }
+        );
+
+        room.on(
+            RoomEvent.ParticipantConnected,
+            recordJoin
+        );
+
+        room.on(
+            RoomEvent.ParticipantDisconnected,
+            recordLeave
+        );
+
+        return () => {
+            room.off(
+                RoomEvent.ParticipantConnected,
+                recordJoin
+            );
+
+            room.off(
+                RoomEvent.ParticipantDisconnected,
+                recordLeave
+            );
+        };
+    }, [room]);
+
+    /* =====================================================
+       GENERATE ATTENDANCE REPORT (PDF, host only)
+    ===================================================== */
+
+    const formatDuration =
+        (seconds) => {
+            if (
+                !Number.isFinite(
+                    seconds
+                ) ||
+                seconds < 0
+            ) {
+                return "—";
+            }
+
+            const hrs = Math.floor(
+                seconds / 3600
+            );
+
+            const mins = Math.floor(
+                (seconds % 3600) / 60
+            );
+
+            const secs = Math.floor(
+                seconds % 60
+            );
+
+            return [
+                hrs,
+                mins,
+                secs,
+            ]
+                .map((value) =>
+                    String(
+                        value
+                    ).padStart(2, "0")
+                )
+                .join(":");
+        };
+
+    const generateAttendanceReport =
+        () => {
+            if (!isHost) {
+                return;
+            }
+
+            /*
+             * Mark anyone still connected right now as leaving "now"
+             * for the purposes of this report, without mutating the
+             * live log — the meeting keeps running after the host
+             * downloads the PDF.
+             */
+            const now = new Date();
+
+            const rows = Array.from(
+                attendanceLogRef.current
+                    .values()
+            )
+                .map((record) => {
+                    const leftAt =
+                        record.leftAt ||
+                        now;
+
+                    const durationSeconds =
+                        (leftAt.getTime() -
+                            record.joinedAt.getTime()) /
+                        1000;
+
+                    return {
+                        ...record,
+                        leftAt,
+                        stillHere:
+                            !record.leftAt,
+                        durationSeconds,
+                    };
+                })
+                .sort(
+                    (a, b) =>
+                        a.joinedAt.getTime() -
+                        b.joinedAt.getTime()
+                );
+
+            const doc = new jsPDF();
+
+            doc.setFontSize(15);
+            doc.text(
+                "Attendance Report",
+                14,
+                17
+            );
+
+            doc.setFontSize(10);
+            doc.setTextColor(110);
+            doc.text(
+                `Meeting ID: ${roomId}    Generated: ${now.toLocaleString()}`,
+                14,
+                24
+            );
+
+            autoTable(doc, {
+                startY: 30,
+                head: [
+                    [
+                        "Name",
+                        "Email",
+                        "Joined",
+                        "Left",
+                        "Duration",
+                    ],
+                ],
+                body: rows.map(
+                    (row) => [
+                        row.name,
+                        row.email || "—",
+                        row.joinedAt.toLocaleTimeString(),
+                        row.stillHere
+                            ? "Still in meeting"
+                            : row.leftAt.toLocaleTimeString(),
+                        formatDuration(
+                            row.durationSeconds
+                        ),
+                    ]
+                ),
+                headStyles: {
+                    fillColor: [
+                        37, 211, 238,
+                    ],
+                    textColor: [
+                        6, 16, 24,
+                    ],
+                },
+                styles: {
+                    fontSize: 9,
+                },
+            });
+
+            doc.save(
+                `attendance-${roomId}.pdf`
+            );
+        };
 
     /* =====================================================
        SHARE CURRENT MEETING
@@ -2119,6 +2390,25 @@ function MeetingRoom({
                     {isHost && (
                         <button
                             type="button"
+                            className="attendance-button"
+                            onClick={
+                                generateAttendanceReport
+                            }
+                            title="Download attendance report (PDF)"
+                        >
+                            <span>
+                                📋
+                            </span>
+
+                            <span>
+                                Attendance Report
+                            </span>
+                        </button>
+                    )}
+
+                    {isHost && (
+                        <button
+                            type="button"
                             className="end-meeting-button"
                             onClick={() =>
                                 setShowEndMeetingConfirm(
@@ -2297,6 +2587,14 @@ function JoinLobby({
     const [participantName, setParticipantName] =
         useState("");
 
+    /*
+     * Optional. Only used to populate the host's Attendance Report
+     * PDF with an email column — the meeting still works fine if
+     * someone leaves it blank.
+     */
+    const [participantEmail, setParticipantEmail] =
+        useState("");
+
     const [micEnabled, setMicEnabled] =
         useState(true);
 
@@ -2428,6 +2726,7 @@ function JoinLobby({
         onJoin(participantName, {
             micEnabled,
             cameraEnabled,
+            email: participantEmail.trim(),
         });
     };
 
@@ -2548,6 +2847,32 @@ function JoinLobby({
                     }
                     onChange={(event) =>
                         setParticipantName(
+                            event.target
+                                .value
+                        )
+                    }
+                    onKeyDown={(event) => {
+                        if (
+                            event.key ===
+                            "Enter"
+                        ) {
+                            handleJoin();
+                        }
+                    }}
+                />
+
+                <label>
+                    Email (optional)
+                </label>
+
+                <input
+                    type="email"
+                    placeholder="you@example.com"
+                    value={
+                        participantEmail
+                    }
+                    onChange={(event) =>
+                        setParticipantEmail(
                             event.target
                                 .value
                         )
@@ -2915,6 +3240,9 @@ function App() {
                                     roomId,
                                     participantName:
                                         trimmedName,
+                                    participantEmail:
+                                        options.email ||
+                                        undefined,
                                     hostToken:
                                         hostToken ||
                                         undefined,

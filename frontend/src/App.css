@@ -1002,6 +1002,40 @@ body[data-theme="light"] .control-badge-dot {
     background: rgba(220, 53, 69, 0.12);
 }
 
+/*
+ * ATTENDANCE REPORT (host-only). Same outlined shape as End Meeting
+ * but in the app's accent color instead of red, since it's a
+ * neutral/informational action rather than a destructive one.
+ */
+.attendance-button {
+    height: 45px;
+    padding: 0 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid #2a6b78;
+    border-radius: 9px;
+    background: transparent;
+    color: #7fe3f2;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.attendance-button:hover {
+    background: rgba(37, 211, 238, 0.1);
+}
+
+body[data-theme="light"] .attendance-button {
+    border-color: #a9dde8;
+    background: #f0fbfd;
+    color: #0f7488;
+}
+
+body[data-theme="light"] .attendance-button:hover {
+    background: #e2f6f9;
+}
+
 /* =========================================================
    CONFIRM / NOTICE OVERLAY
    Used for the host's "End meeting for everyone?" confirmation
@@ -1262,7 +1296,8 @@ body[data-theme="light"] .end-meeting-button:hover {
         border-radius: 9px;
     }
 
-    .end-meeting-button {
+    .end-meeting-button,
+    .attendance-button {
         width: 48px;
         height: 56px;
         padding: 0;
