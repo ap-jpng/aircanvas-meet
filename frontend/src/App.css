@@ -988,23 +988,23 @@ body {
     }
 
     .meeting-control-button {
-        min-width: 48px;
-        width: 48px;
-        height: 58px;
-        flex: 0 0 48px;
-        padding: 4px 2px;
-        border-radius: 10px;
+        min-width: 44px;
+        width: 44px;
+        height: 56px;
+        flex: 0 0 44px;
+        padding: 3px 1px;
+        border-radius: 9px;
     }
 
     .control-label {
-        max-width: 46px;
+        max-width: 42px;
         overflow: hidden;
         text-overflow: ellipsis;
-        font-size: 8px;
+        font-size: 7.5px;
     }
 
     .control-icon {
-        font-size: 17px;
+        font-size: 16px;
     }
 
     .controls-right {
@@ -1014,14 +1014,14 @@ body {
     }
 
     .leave-button {
-        width: 52px;
-        height: 58px;
+        width: 48px;
+        height: 56px;
         padding: 0;
         flex-direction: column;
         justify-content: center;
         gap: 2px;
-        font-size: 8px;
-        border-radius: 10px;
+        font-size: 7.5px;
+        border-radius: 9px;
     }
 
     .side-panel {
