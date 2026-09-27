@@ -11,9 +11,6 @@ function featuresFromLandmarks(landmarks, mirrorX = false) {
     const features = [];
 
     for (const point of landmarks) {
-        // The trained model is right-hand oriented.  For a left hand,
-        // reflecting X around the wrist converts it into the same canonical
-        // shape without changing the user's actual drawing coordinates.
         const relativeX = point.x - wrist.x;
         const canonicalX = mirrorX
             ? -relativeX
@@ -64,12 +61,6 @@ function predictKNN(features) {
     };
 }
 
-/*
- * The original training set is right-hand oriented.  We therefore classify
- * both the detected hand and its X-reflected version and use whichever is
- * closer to the trained gesture space.  This makes the same four gestures
- * work naturally for left- and right-handed writers without retraining.
- */
 function predictHandGesture(landmarks) {
     const normalFeatures =
         featuresFromLandmarks(landmarks, false);
@@ -106,14 +97,6 @@ function smoothPoint(previous, current, alpha = 0.58) {
     };
 }
 
-/*
- * MediaPipe coordinates are normalized against the actual camera frame.
- * ParticipantTile normally uses object-fit: cover, so simply multiplying
- * x/y by the canvas size can be wrong when the aspect ratios differ.
- *
- * This function reproduces the object-fit: cover transform so that the
- * annotation stays on the same visual position as the hand/video.
- */
 function normalizedToCanvas(
     point,
     canvasWidth,
@@ -188,7 +171,8 @@ function drawLine(
     from,
     to,
     mode,
-    width
+    width,
+    color
 ) {
     if (!from || !to) return;
 
@@ -204,7 +188,7 @@ function drawLine(
     } else {
         ctx.globalCompositeOperation =
             "source-over";
-        ctx.strokeStyle = "#00ff66";
+        ctx.strokeStyle = color || "#00ff66";
     }
 
     ctx.beginPath();
@@ -219,7 +203,8 @@ function drawDot(
     ctx,
     point,
     mode,
-    width
+    width,
+    color
 ) {
     if (!point) return;
 
@@ -230,7 +215,7 @@ function drawDot(
             ? "destination-out"
             : "source-over";
 
-    ctx.fillStyle = "#00ff66";
+    ctx.fillStyle = color || "#00ff66";
 
     ctx.beginPath();
     ctx.arc(
@@ -251,6 +236,16 @@ export default function AirCanvas({
     isController = false,
     mirror = false,
     showOverlay = true,
+    markerColor = "#00ff66",
+    markerWidth = 4,
+    /*
+     * NEW: eraser thickness, independently adjustable from the marker's
+     * draw width. Used ONLY for the ERASE gesture. Defaults to 68 --
+     * the value that used to be hardcoded here -- so anyone not using
+     * the new eraser-size control gets the exact same eraser feel as
+     * before.
+     */
+    eraserWidth = 68,
 }) {
     const canvasTileIdentity =
         tileIdentity || activeUserIdentity;
@@ -298,21 +293,44 @@ export default function AirCanvas({
     const mountedRef =
         useRef(true);
 
+    const markerColorRef =
+        useRef(markerColor);
+
+    const markerWidthRef =
+        useRef(markerWidth);
+
+    const eraserWidthRef =
+        useRef(eraserWidth);
+
+    useEffect(() => {
+        markerColorRef.current = markerColor;
+    }, [markerColor]);
+
+    useEffect(() => {
+        markerWidthRef.current = markerWidth;
+    }, [markerWidth]);
+
+    useEffect(() => {
+        eraserWidthRef.current = eraserWidth;
+    }, [eraserWidth]);
+
     const send = async (
         message,
         reliable = false
     ) => {
         try {
+            const fullMessage = {
+                ...message,
+                sourceIdentity:
+                    room.localParticipant.identity,
+                targetIdentity:
+                    message.targetIdentity ||
+                    canvasTileIdentity,
+            };
+
             const payload =
                 new TextEncoder().encode(
-                    JSON.stringify({
-                        ...message,
-                        sourceIdentity:
-                            room.localParticipant.identity,
-                        targetIdentity:
-                            message.targetIdentity ||
-                            canvasTileIdentity,
-                    })
+                    JSON.stringify(fullMessage)
                 );
 
             await room.localParticipant.publishData(
@@ -321,18 +339,6 @@ export default function AirCanvas({
                     reliable,
                     topic: TOPIC,
                 }
-            );
-
-            // TEMP DIAGNOSTIC — remove once the pipeline is confirmed working
-            console.log(
-                "[AirCanvas][SEND]",
-                message?.event?.type || message?.type,
-                "tile:",
-                canvasTileIdentity,
-                "from:",
-                room.localParticipant.identity,
-                "reliable:",
-                reliable
             );
         } catch (error) {
             console.error(
@@ -395,14 +401,11 @@ export default function AirCanvas({
         redrawHistory();
     };
 
-    /*
-     * On mount, ask the owner of this tile for whatever they have
-     * already drawn (see the "history-request" / "history-dump"
-     * handling in the DataReceived effect below). We never need to
-     * request our OWN tile's history — nobody but us could have
-     * drawn on it, so there is nothing anyone else could send back.
-     */
     useEffect(() => {
+        if (!canvasTileIdentity) {
+            return;
+        }
+
         if (
             canvasTileIdentity ===
             room.localParticipant.identity
@@ -473,14 +476,15 @@ export default function AirCanvas({
                         event.point,
                         canvas,
                         video,
-                        mirror
+                        false
                     );
 
                 drawDot(
                     ctx,
                     point,
                     event.mode,
-                    event.width
+                    event.width,
+                    event.color
                 );
 
                 continue;
@@ -495,7 +499,7 @@ export default function AirCanvas({
                         event.from,
                         canvas,
                         video,
-                        mirror
+                        false
                     );
 
                 const to =
@@ -503,7 +507,7 @@ export default function AirCanvas({
                         event.to,
                         canvas,
                         video,
-                        mirror
+                        false
                     );
 
                 drawLine(
@@ -511,7 +515,8 @@ export default function AirCanvas({
                     from,
                     to,
                     event.mode,
-                    event.width
+                    event.width,
+                    event.color
                 );
             }
         }
@@ -655,12 +660,6 @@ export default function AirCanvas({
                     landmarks
                 );
 
-            /*
-             * Stabilize the gesture before drawing.  CLEAR gets a slightly
-             * shorter confirmation because a closed fist is intentionally a
-             * discrete command.  DRAW and ERASE need a few frames so brief
-             * MediaPipe pose changes do not break the stroke.
-             */
             if (
                 detectedGesture ===
                 candidateModeRef.current
@@ -761,30 +760,30 @@ export default function AirCanvas({
                 ),
             };
 
-            /*
-             * IMPORTANT: rawPoint is the CANONICAL coordinate —
-             * exactly what MediaPipe reports, never flipped for the
-             * local selfie-camera mirror. This is the ONLY point value
-             * that ever goes into smoothing, history, and the network
-             * payload (event.point / event.from / event.to).
-             *
-             * Mirroring must be applied ONLY at the moment something
-             * is actually drawn to a specific <canvas>, via the
-             * `mirrored` argument to getCanvasPoint() below — never
-             * baked into the coordinate itself. That is what keeps
-             * local drawing, remote drawing, and history replay all
-             * consistent no matter who is mirrored on whose screen.
-             */
+            const canonicalPoint = {
+                x: 1 - rawPoint.x,
+                y: rawPoint.y,
+            };
+
             const point =
                 smoothPoint(
                     lastPointRef.current,
-                    rawPoint
+                    canonicalPoint
                 );
 
+            /*
+             * width now comes from the eraser-specific ref when
+             * erasing, and from the marker-specific ref when drawing --
+             * two independently adjustable sizes instead of one shared
+             * value with a hardcoded eraser fallback.
+             */
             const width =
                 gesture === "ERASE"
-                    ? 68
-                    : 4;
+                    ? eraserWidthRef.current
+                    : markerWidthRef.current;
+
+            const color =
+                markerColorRef.current;
 
             const ctx =
                 canvas.getContext(
@@ -796,7 +795,7 @@ export default function AirCanvas({
                     point,
                     canvas,
                     video,
-                    mirror
+                    false
                 );
 
             if (
@@ -814,7 +813,8 @@ export default function AirCanvas({
                     ctx,
                     canvasPoint,
                     gesture,
-                    width
+                    width,
+                    color
                 );
 
                 const event = {
@@ -822,6 +822,7 @@ export default function AirCanvas({
                     mode: gesture,
                     point,
                     width,
+                    color,
                     targetIdentity: canvasTileIdentity,
                 };
 
@@ -849,11 +850,6 @@ export default function AirCanvas({
                             .y
                 );
 
-            /*
-             * A very large jump means the hand tracking
-             * temporarily lost the finger. Start again
-             * instead of drawing a diagonal across the board.
-             */
             if (
                 distance >
                 0.12
@@ -871,6 +867,7 @@ export default function AirCanvas({
                     lastPointRef.current,
                 to: point,
                 width,
+                color,
                 targetIdentity: canvasTileIdentity,
             };
 
@@ -879,7 +876,7 @@ export default function AirCanvas({
                     event.from,
                     canvas,
                     video,
-                    mirror
+                    false
                 );
 
             const to =
@@ -887,7 +884,7 @@ export default function AirCanvas({
                     event.to,
                     canvas,
                     video,
-                    mirror
+                    false
                 );
 
             drawLine(
@@ -895,7 +892,8 @@ export default function AirCanvas({
                 from,
                 to,
                 gesture,
-                width
+                width,
+                color
             );
 
             addEvent(event);
@@ -913,11 +911,6 @@ export default function AirCanvas({
                 point;
         };
 
-    /*
-     * Receive drawing events from every participant.
-     * Every client renders the same normalized coordinates
-     * over the active participant's video tile.
-     */
     useEffect(() => {
         const handler = (
             payload,
@@ -953,44 +946,11 @@ export default function AirCanvas({
                     return;
                 }
 
-                // TEMP DIAGNOSTIC — remove once the pipeline is confirmed working
-                console.log(
-                    "[AirCanvas][RECEIVE]",
-                    event.type,
-                    "on tile:",
-                    canvasTileIdentity,
-                    "me:",
-                    room.localParticipant.identity,
-                    "senderParticipant:",
-                    sourceParticipant?.identity,
-                    "message.sourceIdentity:",
-                    message.sourceIdentity
-                );
-
-                /*
-                 * CANVAS HISTORY SYNC
-                 *
-                 * A participant whose AirCanvas instance just mounted
-                 * (they joined mid-meeting, or a tile just appeared)
-                 * starts with an empty historyRef. Without this, they
-                 * see nothing already drawn on that tile until its
-                 * owner draws something NEW — the "host draws, but a
-                 * participant who joined late sees nothing" bug.
-                 *
-                 * Only the participant whose OWN identity equals a
-                 * tile's identity can ever have authoritative history
-                 * for that tile (that is the only client that has ever
-                 * been allowed to draw on it), so a viewer asks that
-                 * owner directly and the owner replies with a one-time
-                 * full dump, independent of who currently holds AirCanvas
-                 * write permission.
-                 */
                 if (event.type === "history-request") {
                     if (
                         message.sourceIdentity ===
                         room.localParticipant.identity
                     ) {
-                        // Our own request, echoed back to us. Ignore it.
                         return;
                     }
 
@@ -1036,13 +996,6 @@ export default function AirCanvas({
                     return;
                 }
 
-                /*
-                 * Each AirCanvas belongs to exactly one participant tile.
-                 * Route a drawing by the identity of the participant who
-                 * produced it. This prevents one person's stroke from being
-                 * rendered on every tile. targetIdentity is retained only as
-                 * a compatibility guard for older packets.
-                 */
                 const sourceIdentity =
                     event.sourceIdentity ||
                     message.sourceIdentity ||
@@ -1052,14 +1005,6 @@ export default function AirCanvas({
                     sourceIdentity &&
                     sourceIdentity !== canvasTileIdentity
                 ) {
-                    // TEMP DIAGNOSTIC — remove once the pipeline is confirmed working
-                    console.log(
-                        "[AirCanvas][DROPPED - source mismatch]",
-                        "sourceIdentity:",
-                        sourceIdentity,
-                        "canvasTileIdentity:",
-                        canvasTileIdentity
-                    );
                     return;
                 }
 
@@ -1075,21 +1020,10 @@ export default function AirCanvas({
                     sourceIdentity,
                 };
 
-                /*
-                 * The controller already draws its own event locally.
-                 * Ignore the echoed packet from LiveKit on that same
-                 * browser so the local stroke is not duplicated.
-                 */
                 if (
                     sourceParticipant?.identity ===
                     room.localParticipant.identity
                 ) {
-                    // TEMP DIAGNOSTIC — remove once the pipeline is confirmed working
-                    console.log(
-                        "[AirCanvas][DROPPED - treated as self-echo]",
-                        "sourceParticipant:",
-                        sourceParticipant?.identity
-                    );
                     return;
                 }
 
@@ -1146,19 +1080,12 @@ export default function AirCanvas({
                             false
                         );
 
-                    // TEMP DIAGNOSTIC — remove once the pipeline is confirmed working
-                    console.log(
-                        "[AirCanvas][DRAWING dot]",
-                        "tile:",
-                        canvasTileIdentity,
-                        point
-                    );
-
                     drawDot(
                         ctx,
                         point,
                         routedEvent.mode,
-                        routedEvent.width
+                        routedEvent.width,
+                        routedEvent.color
                     );
                 } else {
                     const from =
@@ -1177,21 +1104,13 @@ export default function AirCanvas({
                             false
                         );
 
-                    // TEMP DIAGNOSTIC — remove once the pipeline is confirmed working
-                    console.log(
-                        "[AirCanvas][DRAWING line]",
-                        "tile:",
-                        canvasTileIdentity,
-                        from,
-                        to
-                    );
-
                     drawLine(
                         ctx,
                         from,
                         to,
                         routedEvent.mode,
-                        routedEvent.width
+                        routedEvent.width,
+                        routedEvent.color
                     );
                 }
             } catch (error) {
@@ -1219,12 +1138,6 @@ export default function AirCanvas({
         mirror,
     ]);
 
-    /*
-     * Attach the controller's existing LiveKit camera
-     * track to an invisible processing video.
-     *
-     * We NEVER create a second camera stream.
-     */
     useEffect(() => {
         let stopped =
             false;
@@ -1321,10 +1234,6 @@ export default function AirCanvas({
         canvasTileIdentity,
     ]);
 
-    /*
-     * Load legacy MediaPipe Hands.
-     * This keeps the tested KNN model and browser pipeline.
-     */
     useEffect(() => {
         if (!isController) {
             return undefined;
@@ -1465,10 +1374,6 @@ export default function AirCanvas({
         mirror,
     ]);
 
-    /*
-     * Run MediaPipe continuously while this participant
-     * owns AirCanvas control.
-     */
     useEffect(() => {
         if (!isController) {
             return undefined;
@@ -1566,9 +1471,6 @@ export default function AirCanvas({
         isController,
     ]);
 
-    /*
-     * Resize the transparent overlay whenever the tile changes.
-     */
     useEffect(() => {
         mountedRef.current =
             true;
@@ -1617,9 +1519,6 @@ export default function AirCanvas({
         };
     }, []);
 
-    /*
-     * Redraw when the tile/video becomes available.
-     */
     useEffect(() => {
         const timer =
             window.setTimeout(

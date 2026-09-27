@@ -1,5 +1,6 @@
 import {
     useEffect,
+    useRef,
     useState,
 } from "react";
 
@@ -16,7 +17,6 @@ import {
 import {
     Track,
     RoomEvent,
-    DisconnectReason,
 } from "livekit-client";
 
 import "@livekit/components-styles";
@@ -55,6 +55,140 @@ function sendAirCanvasMessage(room, message) {
 }
 
 /* =========================================================
+   MARKER CONTROLS
+   Shared between the side panel and the floating popover so
+   both stay in sync automatically -- there's only one copy
+   of the actual markup and behaviour.
+========================================================= */
+
+function MarkerControls({
+    color,
+    setColor,
+    width,
+    setWidth,
+    presets,
+    eraserWidth,
+    setEraserWidth,
+}) {
+    return (
+        <>
+            <div
+                style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    marginBottom: "12px",
+                }}
+            >
+                {presets.map((preset) => (
+                    <button
+                        key={preset}
+                        type="button"
+                        onClick={() =>
+                            setColor(preset)
+                        }
+                        title={preset}
+                        style={{
+                            width: "26px",
+                            height: "26px",
+                            borderRadius: "50%",
+                            cursor: "pointer",
+                            background: preset,
+                            border:
+                                color === preset
+                                    ? "2px solid #ffffff"
+                                    : "2px solid rgba(255,255,255,0.15)",
+                            boxShadow:
+                                color === preset
+                                    ? "0 0 0 2px rgba(37,211,238,0.5)"
+                                    : "none",
+                        }}
+                    />
+                ))}
+
+                <input
+                    type="color"
+                    value={color}
+                    onChange={(event) =>
+                        setColor(event.target.value)
+                    }
+                    title="Custom color"
+                    style={{
+                        width: "26px",
+                        height: "26px",
+                        padding: 0,
+                        border: "none",
+                        borderRadius: "50%",
+                        background: "transparent",
+                        cursor: "pointer",
+                    }}
+                />
+            </div>
+
+            <label
+                style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    color: "#d6dce7",
+                    fontSize: "12px",
+                    fontWeight: 600,
+                    marginBottom: "4px",
+                }}
+            >
+                <span>Marker size</span>
+                <span>{width}px</span>
+            </label>
+
+            <input
+                type="range"
+                min="2"
+                max="14"
+                step="1"
+                value={width}
+                onChange={(event) =>
+                    setWidth(Number(event.target.value))
+                }
+                style={{ width: "100%", marginBottom: "12px" }}
+            />
+
+            {/*
+              * Eraser size is intentionally a separate slider with its
+              * own, much larger range -- the eraser has always used a
+              * fixed 68px footprint in AirCanvas.jsx, so the useful
+              * range for "how big an area does one erase gesture
+              * clear" is naturally much bigger than the 2-14px range
+              * that makes sense for a drawing line.
+              */}
+            <label
+                style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    color: "#d6dce7",
+                    fontSize: "12px",
+                    fontWeight: 600,
+                    marginBottom: "4px",
+                }}
+            >
+                <span>Eraser size</span>
+                <span>{eraserWidth}px</span>
+            </label>
+
+            <input
+                type="range"
+                min="20"
+                max="140"
+                step="4"
+                value={eraserWidth}
+                onChange={(event) =>
+                    setEraserWidth(Number(event.target.value))
+                }
+                style={{ width: "100%" }}
+            />
+        </>
+    );
+}
+
+/* =========================================================
    MEETING ROOM
 ========================================================= */
 
@@ -63,25 +197,52 @@ function MeetingRoom({
     connectionStatus,
     onLeave,
     isHost,
+    initialMicEnabled,
+    initialCameraEnabled,
 }) {
     const room = useRoomContext();
 
     const participants =
         useParticipants();
 
-    const cameraTracks = useTracks([
+    const allTracks = useTracks([
         {
             source: Track.Source.Camera,
             withPlaceholder: true,
         },
-    ]);
-
-    const screenTracks = useTracks([
         {
             source: Track.Source.ScreenShare,
-            withPlaceholder: false,
         },
     ]);
+
+    /*
+     * useTracks returns one flat list mixing both requested sources.
+     * Split them: camera tiles keep the existing grid behaviour,
+     * screen-share tracks get their own large area above the grid so
+     * every participant can actually see who's sharing and what.
+     */
+    /*
+     * useTracks returns one flat list mixing both requested sources.
+     * Split them: camera tiles keep the existing grid behaviour,
+     * screen-share tracks get their own large area above the grid so
+     * every participant can actually see who's sharing and what.
+     *
+     * Checking both `track.source` and `track.publication?.source`
+     * because the exact shape of a TrackReference has varied slightly
+     * across @livekit/components-react versions -- this works either
+     * way instead of silently filtering everything out on a version
+     * that puts it on `.publication.source`.
+     */
+    const trackSource = (track) =>
+        track.source || track.publication?.source;
+
+    const cameraTracks = allTracks.filter(
+        (track) => trackSource(track) === Track.Source.Camera
+    );
+
+    const screenShareTracks = allTracks.filter(
+        (track) => trackSource(track) === Track.Source.ScreenShare
+    );
 
     const [activePanel, setActivePanel] =
         useState(null);
@@ -90,12 +251,49 @@ function MeetingRoom({
         useState(false);
 
     const [micEnabled, setMicEnabled] =
-        useState(true);
+        useState(initialMicEnabled);
 
     const [cameraEnabled, setCameraEnabled] =
-        useState(true);
+        useState(initialCameraEnabled);
 
     const [screenSharing, setScreenSharing] =
+        useState(false);
+
+    /*
+     * The writer's chosen AirCanvas marker color/size. Passed straight
+     * through to every <AirCanvas> instance below -- only the instance
+     * that is currently this browser's controller ever actually reads
+     * them (see the matching comment in AirCanvas.jsx), so handing them
+     * to every tile unconditionally is harmless.
+     */
+    const [markerColor, setMarkerColor] =
+        useState("#00ff66");
+
+    const [markerWidth, setMarkerWidth] =
+        useState(4);
+
+    /*
+     * Eraser size is independent from marker draw width. Defaults to
+     * 68 -- the value AirCanvas.jsx used to hardcode -- so nobody's
+     * eraser feel changes unless they actually move this slider.
+     */
+    const [eraserWidth, setEraserWidth] =
+        useState(68);
+
+    const MARKER_COLOR_PRESETS = [
+        "#00ff66",
+        "#25d3ee",
+        "#ff4d6d",
+        "#ffd23f",
+        "#ffffff",
+    ];
+
+    /*
+     * Whether the small floating marker popover (the pen icon on the
+     * local user's own video tile) is open. Independent of the side
+     * panel -- either one can be used to change color/size.
+     */
+    const [showMarkerPopover, setShowMarkerPopover] =
         useState(false);
 
     const [
@@ -107,7 +305,7 @@ function MeetingRoom({
      * explicitAirCanvasWriter is set ONLY by an explicit grant/revoke/
      * state-sync message ("aircanvas-granted", "aircanvas-revoked",
      * "aircanvas-state"). null means "nobody has been explicitly
-     * granted control — default to the host."
+     * granted control -- default to the host."
      */
     const [
         explicitAirCanvasWriter,
@@ -146,28 +344,24 @@ function MeetingRoom({
                 : null
         );
 
-    /*
-     * airCanvasUser is DERIVED, computed fresh every render, instead
-     * of being "defaulted" inside a useEffect. This used to be a
-     * useState that a useEffect would set to hostIdentity once
-     * hostIdentity became available. The problem: on a participant's
-     * browser, the LiveKit participant list can take a moment to
-     * populate right after connecting, so hostIdentity could still be
-     * null the one time that effect happened to run — and since
-     * nothing else would ever re-trigger the "default to host" logic
-     * afterward, airCanvasUser got stuck at null FOREVER for that
-     * participant. Every tile's showOverlay check
-     * (tileIdentity === airCanvasUser) is false when airCanvasUser is
-     * null, so that participant's browser would never show ANY
-     * AirCanvas overlay, including the Host's — which is exactly the
-     * "Host draws but nobody else sees the marker" bug.
-     *
-     * Deriving it here instead removes the race entirely: hostIdentity
-     * is computed synchronously above from `participants` on every
-     * render, so airCanvasUser is correct the moment hostIdentity is.
-     */
     const airCanvasUser =
         explicitAirCanvasWriter || hostIdentity;
+
+    /*
+     * Whether the LOCAL browser is currently the one allowed to draw
+     * (on its own tile), regardless of which tile is being displayed
+     * where. Mirrors the per-tile `isController` expression used below
+     * for the tile that happens to match this browser's own identity.
+     * Used only to decide whether to show the marker color/size
+     * controls -- it doesn't change who can draw.
+     */
+    const isLocalController =
+        isHost ||
+        (
+            airCanvasAllowed &&
+            airCanvasUser ===
+                room.localParticipant.identity
+        );
 
     /*
      * The host always has AirCanvas permission. This no longer needs
@@ -218,10 +412,6 @@ function MeetingRoom({
                         )
                     );
 
-                /* =========================================
-                   AIR CANVAS STATE REQUEST
-                ========================================= */
-
                 if (
                     message.type ===
                     "aircanvas-state-request"
@@ -244,10 +434,6 @@ function MeetingRoom({
 
                     return;
                 }
-
-                /* =========================================
-                   AIR CANVAS STATE
-                ========================================= */
 
                 if (
                     message.type ===
@@ -273,10 +459,6 @@ function MeetingRoom({
                     return;
                 }
 
-                /* =========================================
-                   PARTICIPANT REQUESTS ACCESS
-                ========================================= */
-
                 if (
                     message.type ===
                     "aircanvas-request"
@@ -296,19 +478,10 @@ function MeetingRoom({
                     return;
                 }
 
-                /* =========================================
-                   HOST ALLOWS PARTICIPANT
-                ========================================= */
-
                 if (
                     message.type ===
                     "aircanvas-granted"
                 ) {
-                    /*
-                     * Every participant updates the active AirCanvas
-                     * identity. This makes the same canvas appear on
-                     * the same camera tile on laptops and phones.
-                     */
                     setExplicitAirCanvasWriter(
                         message.identity
                     );
@@ -323,19 +496,10 @@ function MeetingRoom({
                     return;
                 }
 
-                /* =========================================
-                   HOST REVOKES ACCESS
-                ========================================= */
-
                 if (
                     message.type ===
                     "aircanvas-revoked"
                 ) {
-                    /*
-                     * Return AirCanvas control to the host for everyone.
-                     * null means "no explicit writer" — airCanvasUser
-                     * derives back to hostIdentity automatically.
-                     */
                     setExplicitAirCanvasWriter(
                         null
                     );
@@ -346,10 +510,6 @@ function MeetingRoom({
 
                     return;
                 }
-
-                /* =========================================
-                   HOST DENIES REQUEST
-                ========================================= */
 
                 if (
                     message.type ===
@@ -535,11 +695,6 @@ function MeetingRoom({
                 }
             );
 
-            /*
-             * Every client will receive the grant message and update
-             * airCanvasUser. The host remains the permission controller,
-             * while the selected participant becomes the controller.
-             */
             setExplicitAirCanvasWriter(
                 identity
             );
@@ -596,12 +751,6 @@ function MeetingRoom({
                 }
             );
 
-            /*
-             * All clients return the visible AirCanvas to the host.
-             * The revoked participant loses controller permission.
-             * null means "no explicit writer" — airCanvasUser derives
-             * back to hostIdentity automatically.
-             */
             setExplicitAirCanvasWriter(
                 null
             );
@@ -667,12 +816,6 @@ function MeetingRoom({
     const handleShareMeeting =
         async () => {
             try {
-                /*
-                 * Always build the clean public meeting URL from
-                 * the current origin and room ID.
-                 *
-                 * The host token is intentionally excluded.
-                 */
                 const meetingLink =
                     `${window.location.origin}/meeting/${roomId}`;
 
@@ -720,10 +863,6 @@ function MeetingRoom({
                 console.error(
                     "Share meeting error:",
                     error
-                );
-
-                setError(
-                    "Unable to copy the meeting link. Please copy the URL from the browser."
                 );
             }
         };
@@ -818,84 +957,59 @@ function MeetingRoom({
 
                 <main className="video-area">
 
-                    {screenTracks.length >
-                        0 && (
+                    {/*
+                      * Screen share gets its own large area, separate
+                      * from the camera grid, so it's clearly visible to
+                      * every participant -- not just the person sharing.
+                      * Multiple simultaneous screen shares are unusual
+                      * but handled: each gets its own tile, stacked.
+                      */}
+                    {screenShareTracks.length > 0 && (
                         <div
                             style={{
-                                width: "100%",
-                                marginBottom:
-                                    "12px",
                                 display: "flex",
-                                flexDirection:
-                                    "column",
-                                gap: "12px",
+                                flexDirection: "column",
+                                gap: "8px",
+                                padding: "8px",
                             }}
                         >
-                            {screenTracks.map(
-                                (
-                                    track
-                                ) => (
+                            {screenShareTracks.map((track) => (
+                                <div
+                                    key={`screen-${track.participant.identity}`}
+                                    style={{
+                                        position: "relative",
+                                        width: "100%",
+                                        aspectRatio: "16 / 9",
+                                        borderRadius: "12px",
+                                        overflow: "hidden",
+                                        background: "#000",
+                                        border: "1px solid rgba(255,255,255,0.12)",
+                                    }}
+                                >
+                                    <ParticipantTile
+                                        trackRef={track}
+                                        className="custom-participant-tile"
+                                    />
+
                                     <div
-                                        key={`screen-${track.participant.identity}`}
                                         style={{
-                                            position:
-                                                "relative",
-                                            width: "100%",
-                                            aspectRatio:
-                                                "16 / 9",
-                                            background:
-                                                "#000",
-                                            borderRadius:
-                                                "10px",
-                                            overflow:
-                                                "hidden",
+                                            position: "absolute",
+                                            top: "10px",
+                                            left: "10px",
+                                            padding: "4px 10px",
+                                            borderRadius: "6px",
+                                            background: "rgba(0,0,0,0.6)",
+                                            color: "#fff",
+                                            fontSize: "13px",
+                                            fontWeight: 600,
                                         }}
                                     >
-                                        <ParticipantTile
-                                            trackRef={
-                                                track
-                                            }
-                                            className="custom-participant-tile"
-                                        />
-
-                                        <div
-                                            style={{
-                                                position:
-                                                    "absolute",
-                                                top: "10px",
-                                                left: "10px",
-                                                background:
-                                                    "rgba(0,0,0,0.65)",
-                                                color:
-                                                    "#fff",
-                                                padding:
-                                                    "5px 12px",
-                                                borderRadius:
-                                                    "6px",
-                                                fontSize:
-                                                    "13px",
-                                            }}
-                                        >
-                                            🖥️{" "}
-                                            {track
-                                                .participant
-                                                .name ||
-                                                track
-                                                    .participant
-                                                    .identity}
-                                            's
-                                            screen
-                                            {track
-                                                .participant
-                                                .identity ===
-                                                room
-                                                    .localParticipant
-                                                    .identity &&
-                                                " (you)"}
-                                        </div>
+                                        {(track.participant.name ||
+                                            track.participant.identity) +
+                                            "'s screen"}
                                     </div>
-                                )
-                            )}
+                                </div>
+                            ))}
                         </div>
                     )}
 
@@ -927,7 +1041,12 @@ function MeetingRoom({
                             </div>
                         ) : (
                             cameraTracks.map(
-                                (track) => (
+                                (track) => {
+                                    const isOwnTile =
+                                        track.participant.identity ===
+                                        room.localParticipant.identity;
+
+                                    return (
                                     <div
                                         className="participant-tile-wrapper"
                                         key={
@@ -937,28 +1056,35 @@ function MeetingRoom({
                                         }
                                         style={{
                                             position: "relative",
-                                            overflow: "hidden",
                                         }}
                                     >
 
-                                        <ParticipantTile
-                                            trackRef={
-                                                track
-                                            }
-                                            className="custom-participant-tile"
-                                        />
+                                        {/*
+                                          * Inner layer: the video tile and the
+                                          * drawing canvas, clipped to the tile's
+                                          * rounded corners. The marker popover
+                                          * deliberately lives OUTSIDE this div --
+                                          * it used to be a sibling INSIDE the
+                                          * overflow:hidden wrapper, which silently
+                                          * clipped it off-screen even though it was
+                                          * rendering and its state was toggling
+                                          * correctly on click.
+                                          */}
+                                        <div
+                                            style={{
+                                                position: "absolute",
+                                                inset: 0,
+                                                overflow: "hidden",
+                                                borderRadius: "inherit",
+                                            }}
+                                        >
+                                            <ParticipantTile
+                                                trackRef={
+                                                    track
+                                                }
+                                                className="custom-participant-tile"
+                                            />
 
-                                        {
-                                            /*
-                                             * Mount one AirCanvas instance for EVERY
-                                             * camera tile. All instances receive the
-                                             * same LiveKit drawing events and maintain
-                                             * the same normalized history. Only the
-                                             * currently active participant's overlay
-                                             * is visible. This prevents the canvas from
-                                             * disappearing when control moves between
-                                             * host and participant.
-                                             */
                                             <AirCanvas
                                                 activeUserIdentity={
                                                     airCanvasUser
@@ -967,8 +1093,7 @@ function MeetingRoom({
                                                     track.participant.identity
                                                 }
                                                 isController={
-                                                    track.participant.identity ===
-                                                        room.localParticipant.identity &&
+                                                    isOwnTile &&
                                                     (
                                                         isHost ||
                                                         (
@@ -978,16 +1103,99 @@ function MeetingRoom({
                                                         )
                                                     )
                                                 }
-                                                mirror={
-                                                    track.participant.identity ===
-                                                    room.localParticipant.identity
-                                                }
                                                 showOverlay={
                                                     track.participant.identity ===
                                                     airCanvasUser
                                                 }
+                                                markerColor={
+                                                    markerColor
+                                                }
+                                                markerWidth={
+                                                    markerWidth
+                                                }
+                                                eraserWidth={
+                                                    eraserWidth
+                                                }
                                             />
-                                        }
+                                        </div>
+
+                                        {/*
+                                          * Floating marker pen button, shown only on
+                                          * the local user's own tile and only when
+                                          * they're actually allowed to draw. Sits
+                                          * above LiveKit's built-in connection-quality
+                                          * icon (top-right of the tile) so it doesn't
+                                          * overlap it. Adjust the `top` value below if
+                                          * your LiveKit version positions that icon
+                                          * differently.
+                                          */}
+                                        {isOwnTile &&
+                                            isLocalController && (
+                                            <div
+                                                style={{
+                                                    position: "absolute",
+                                                    top: "10px",
+                                                    right: "10px",
+                                                    zIndex: 40,
+                                                }}
+                                            >
+                                                <button
+                                                    type="button"
+                                                    onClick={() =>
+                                                        setShowMarkerPopover(
+                                                            (value) => !value
+                                                        )
+                                                    }
+                                                    title="Marker settings"
+                                                    aria-label="Marker settings"
+                                                    aria-expanded={showMarkerPopover}
+                                                    style={{
+                                                        width: "48px",
+                                                        height: "48px",
+                                                        borderRadius: "50%",
+                                                        border: "2px solid rgba(255,255,255,0.35)",
+                                                        background: "rgba(12,15,22,0.85)",
+                                                        color: "#fff",
+                                                        fontSize: "24px",
+                                                        lineHeight: "1",
+                                                        cursor: "pointer",
+                                                        display: "flex",
+                                                        alignItems: "center",
+                                                        justifyContent: "center",
+                                                        boxShadow: "0 3px 10px rgba(0,0,0,0.45)",
+                                                    }}
+                                                >
+                                                    🖊️
+                                                </button>
+
+                                                {showMarkerPopover && (
+                                                    <div
+                                                        style={{
+                                                            position: "absolute",
+                                                            top: "56px",
+                                                            right: 0,
+                                                            width: "220px",
+                                                            padding: "14px",
+                                                            borderRadius: "10px",
+                                                            background: "rgba(13,17,26,0.94)",
+                                                            border: "1px solid rgba(255,255,255,0.12)",
+                                                            boxShadow: "0 10px 28px rgba(0,0,0,0.45)",
+                                                            zIndex: 50,
+                                                        }}
+                                                    >
+                                                        <MarkerControls
+                                                            color={markerColor}
+                                                            setColor={setMarkerColor}
+                                                            width={markerWidth}
+                                                            setWidth={setMarkerWidth}
+                                                            presets={MARKER_COLOR_PRESETS}
+                                                            eraserWidth={eraserWidth}
+                                                            setEraserWidth={setEraserWidth}
+                                                        />
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
 
                                         <div className="participant-overlay">
 
@@ -1031,7 +1239,8 @@ function MeetingRoom({
                                         </div>
 
                                     </div>
-                                )
+                                    );
+                                }
                             )
                         )}
 
@@ -1042,7 +1251,24 @@ function MeetingRoom({
                 {/* SIDE PANEL */}
 
                 {activePanel && (
-                    <aside className="side-panel">
+                    <aside
+                        className="side-panel"
+                        style={{
+                            overflowY: "auto",
+                            /*
+                             * A percentage max-height only works if the
+                             * parent has a definite resolved height; if
+                             * it doesn't, this silently does nothing and
+                             * the panel just grows past the viewport
+                             * with no way to scroll to it. A viewport
+                             * based calc doesn't have that problem --
+                             * 190px approximates the header + bottom
+                             * controls bar height, adjust if your exact
+                             * header/controls are taller or shorter.
+                             */
+                            maxHeight: "calc(100vh - 190px)",
+                        }}
+                    >
 
                         <div className="side-panel-header">
 
@@ -1140,16 +1366,16 @@ function MeetingRoom({
                                                         participant.identity}
                                                 </strong>
 
-                                                <span>
-                                                    {participant.identity ===
-                                                        room
-                                                            .localParticipant
-                                                            .identity &&
-                                                        "You"}
-                                                    {participant.identity ===
-                                                        hostIdentity &&
-                                                        " • Host"}
-                                                </span>
+                                                {participant.identity ===
+                                                    room
+                                                        .localParticipant
+                                                        .identity && (
+                                                    <span>
+                                                        You
+                                                        {isHost &&
+                                                            " • Host"}
+                                                    </span>
+                                                )}
 
                                             </div>
 
@@ -1193,6 +1419,52 @@ function MeetingRoom({
                                         "#dce3ee",
                                 }}
                             >
+
+                                {isLocalController && (
+                                    <div
+                                        style={{
+                                            padding:
+                                                "14px",
+                                            borderRadius:
+                                                "10px",
+                                            background:
+                                                "#151f31",
+                                            marginBottom:
+                                                "15px",
+                                        }}
+                                    >
+                                        <strong>
+                                            Marker
+                                        </strong>
+
+                                        <p
+                                            style={{
+                                                margin:
+                                                    "4px 0 10px",
+                                                color:
+                                                    "#8995a9",
+                                                fontSize:
+                                                    "12px",
+                                            }}
+                                        >
+                                            Choose the
+                                            color and
+                                            size of your
+                                            AirCanvas
+                                            marker.
+                                        </p>
+
+                                        <MarkerControls
+                                            color={markerColor}
+                                            setColor={setMarkerColor}
+                                            width={markerWidth}
+                                            setWidth={setMarkerWidth}
+                                            presets={MARKER_COLOR_PRESETS}
+                                            eraserWidth={eraserWidth}
+                                            setEraserWidth={setEraserWidth}
+                                        />
+                                    </div>
+                                )}
 
                                 {isHost ? (
                                     <>
@@ -1673,6 +1945,309 @@ function ControlButton({
 }
 
 /* =========================================================
+   JOIN LOBBY
+========================================================= */
+
+function JoinLobby({
+    roomId,
+    error,
+    loading,
+    onBack,
+    onJoin,
+}) {
+    const videoRef = useRef(null);
+    const streamRef = useRef(null);
+
+    const [participantName, setParticipantName] =
+        useState("");
+
+    const [micEnabled, setMicEnabled] =
+        useState(true);
+
+    const [cameraEnabled, setCameraEnabled] =
+        useState(true);
+
+    const [previewError, setPreviewError] =
+        useState("");
+
+    useEffect(() => {
+        let cancelled = false;
+
+        const startPreview = async () => {
+            try {
+                const stream =
+                    await navigator.mediaDevices.getUserMedia(
+                        {
+                            audio: true,
+                            video: true,
+                        }
+                    );
+
+                if (cancelled) {
+                    stream
+                        .getTracks()
+                        .forEach((track) =>
+                            track.stop()
+                        );
+
+                    return;
+                }
+
+                streamRef.current = stream;
+
+                if (videoRef.current) {
+                    videoRef.current.srcObject =
+                        stream;
+                }
+            } catch (err) {
+                console.error(
+                    "Lobby preview error:",
+                    err
+                );
+
+                if (!cancelled) {
+                    setPreviewError(
+                        "Could not access your camera or microphone. You can still join — just check your browser permissions first."
+                    );
+                }
+            }
+        };
+
+        startPreview();
+
+        return () => {
+            cancelled = true;
+
+            if (streamRef.current) {
+                streamRef.current
+                    .getTracks()
+                    .forEach((track) =>
+                        track.stop()
+                    );
+
+                streamRef.current = null;
+            }
+        };
+    }, []);
+
+    const toggleMic = () => {
+        const stream = streamRef.current;
+        const nextEnabled = !micEnabled;
+
+        if (stream) {
+            stream
+                .getAudioTracks()
+                .forEach((track) => {
+                    track.enabled =
+                        nextEnabled;
+                });
+        }
+
+        setMicEnabled(nextEnabled);
+    };
+
+    const toggleCamera = () => {
+        const stream = streamRef.current;
+        const nextEnabled = !cameraEnabled;
+
+        if (stream) {
+            stream
+                .getVideoTracks()
+                .forEach((track) => {
+                    track.enabled =
+                        nextEnabled;
+                });
+        }
+
+        setCameraEnabled(nextEnabled);
+    };
+
+    const handleJoin = () => {
+        if (!participantName.trim()) {
+            return;
+        }
+
+        if (streamRef.current) {
+            streamRef.current
+                .getTracks()
+                .forEach((track) =>
+                    track.stop()
+                );
+
+            streamRef.current = null;
+        }
+
+        onJoin(participantName, {
+            micEnabled,
+            cameraEnabled,
+        });
+    };
+
+    return (
+        <div className="landing-page">
+
+            <div className="lobby-card">
+
+                <h1>
+                    Ready to join?
+                </h1>
+
+                <p className="subtitle">
+                    Check your camera and
+                    mic before you join.
+                </p>
+
+                <div className="lobby-preview-wrap">
+
+                    <video
+                        ref={videoRef}
+                        muted
+                        playsInline
+                        autoPlay
+                        className="lobby-preview-video"
+                        style={{
+                            visibility:
+                                cameraEnabled
+                                    ? "visible"
+                                    : "hidden",
+                        }}
+                    />
+
+                    {!cameraEnabled && (
+                        <div className="lobby-preview-placeholder">
+                            <div className="lobby-preview-avatar">
+                                {(
+                                    participantName ||
+                                    "U"
+                                )
+                                    .charAt(0)
+                                    .toUpperCase()}
+                            </div>
+                        </div>
+                    )}
+
+                    <div className="lobby-preview-controls">
+
+                        <button
+                            type="button"
+                            className={`lobby-toggle-button ${
+                                micEnabled
+                                    ? ""
+                                    : "off"
+                            }`}
+                            onClick={
+                                toggleMic
+                            }
+                            title={
+                                micEnabled
+                                    ? "Mute microphone"
+                                    : "Unmute microphone"
+                            }
+                        >
+                            {micEnabled
+                                ? "🎤"
+                                : "🔇"}
+                        </button>
+
+                        <button
+                            type="button"
+                            className={`lobby-toggle-button ${
+                                cameraEnabled
+                                    ? ""
+                                    : "off"
+                            }`}
+                            onClick={
+                                toggleCamera
+                            }
+                            title={
+                                cameraEnabled
+                                    ? "Turn off camera"
+                                    : "Turn on camera"
+                            }
+                        >
+                            {cameraEnabled
+                                ? "📹"
+                                : "📹̸"}
+                        </button>
+
+                    </div>
+
+                </div>
+
+                <div className="room-id-box">
+
+                    <span>
+                        Meeting ID
+                    </span>
+
+                    <strong>
+                        {roomId}
+                    </strong>
+
+                </div>
+
+                <label>
+                    Your name
+                </label>
+
+                <input
+                    type="text"
+                    placeholder="Enter your name"
+                    value={
+                        participantName
+                    }
+                    onChange={(event) =>
+                        setParticipantName(
+                            event.target
+                                .value
+                        )
+                    }
+                    onKeyDown={(event) => {
+                        if (
+                            event.key ===
+                            "Enter"
+                        ) {
+                            handleJoin();
+                        }
+                    }}
+                />
+
+                {previewError && (
+                    <div className="error-message">
+                        {previewError}
+                    </div>
+                )}
+
+                {error && (
+                    <div className="error-message">
+                        {error}
+                    </div>
+                )}
+
+                <button
+                    className="primary-button"
+                    onClick={handleJoin}
+                    disabled={loading}
+                >
+                    {loading
+                        ? "Connecting..."
+                        : "Join Meeting"}
+                </button>
+
+                <button
+                    className="back-button"
+                    onClick={onBack}
+                >
+                    ← Back
+                </button>
+
+            </div>
+
+        </div>
+    );
+}
+
+/* =========================================================
    MAIN APP
 ========================================================= */
 
@@ -1712,9 +2287,15 @@ function App() {
     const [isHost, setIsHost] =
         useState(false);
 
-    /* =====================================================
-       READ ROOM FROM URL
-    ===================================================== */
+    const [
+        initialMicEnabled,
+        setInitialMicEnabled,
+    ] = useState(true);
+
+    const [
+        initialCameraEnabled,
+        setInitialCameraEnabled,
+    ] = useState(true);
 
     useEffect(() => {
         const pathParts =
@@ -1732,14 +2313,6 @@ function App() {
 
             setRoomId(currentRoomId);
 
-            /*
-             * When the host creates a meeting from localhost,
-             * the browser is redirected to the production Vercel
-             * meeting URL. The host token is temporarily transferred
-             * in the URL fragment because fragments are not sent to
-             * the server. We immediately move the token into
-             * sessionStorage and remove the fragment from the URL.
-             */
             const hashParams =
                 new URLSearchParams(
                     window.location.hash.substring(1)
@@ -1749,15 +2322,6 @@ function App() {
                 hashParams.get("hostToken");
 
             if (transferredHostToken) {
-                /*
-                 * sessionStorage, not localStorage: the host token
-                 * must belong to THIS TAB only. localStorage is shared
-                 * by every tab/window on the same origin, so opening a
-                 * second tab to the same meeting URL would silently
-                 * read this token too and both tabs would think they
-                 * were the host. sessionStorage is private per tab and
-                 * still survives refresh/navigation within that tab.
-                 */
                 sessionStorage.setItem(
                     `aircanvas-host-${currentRoomId}`,
                     transferredHostToken
@@ -1771,11 +2335,6 @@ function App() {
             }
         }
     }, []);
-
-
-    /* =====================================================
-       CREATE MEETING
-    ===================================================== */
 
     const createMeeting =
         async () => {
@@ -1808,17 +2367,6 @@ function App() {
                     );
                 }
 
-                /*
-                 * Save the host token on the current origin too.
-                 * This keeps the host authenticated if the user
-                 * continues working on the same development origin.
-                 *
-                 * sessionStorage (not localStorage): this token must
-                 * stay bound to the tab that actually clicked "Create
-                 * meeting". A second tab opened later to the same
-                 * meeting link — even in the same browser — must NOT
-                 * inherit host status.
-                 */
                 if (data.hostToken) {
                     sessionStorage.setItem(
                         `aircanvas-host-${data.roomId}`,
@@ -1826,18 +2374,6 @@ function App() {
                     );
                 }
 
-                /*
-                 * The backend now returns the public Vercel meeting
-                 * link. We must navigate to that URL instead of using
-                 * history.pushState(), because pushState() can only
-                 * change URLs on the current origin.
-                 *
-                 * The host token is transferred in the URL fragment.
-                 * Fragments are handled only by the browser and are
-                 * not sent to Render. The production App.jsx reads
-                 * the fragment, stores the token in sessionStorage,
-                 * and immediately removes the fragment from the URL.
-                 */
                 const meetingLink =
                     data.meetingLink ||
                     `https://aircanvas-meet.vercel.app/meeting/${data.roomId}`;
@@ -1869,11 +2405,6 @@ function App() {
             }
         };
 
-
-    /* =====================================================
-       JOIN EXISTING MEETING
-    ===================================================== */
-
     const joinExistingMeeting =
         () => {
             const cleanRoomId =
@@ -1901,15 +2432,16 @@ function App() {
             );
         };
 
-    /* =====================================================
-       JOIN MEETING
-    ===================================================== */
-
     const joinMeeting =
-        async () => {
-            if (
-                !participantName.trim()
-            ) {
+        async (
+            name,
+            options = {}
+        ) => {
+            const trimmedName = (
+                name || ""
+            ).trim();
+
+            if (!trimmedName) {
                 setError(
                     "Please enter your name."
                 );
@@ -1927,15 +2459,24 @@ function App() {
                 setLoading(true);
                 setError("");
 
+                setParticipantName(
+                    trimmedName
+                );
+
+                setInitialMicEnabled(
+                    options.micEnabled ??
+                        true
+                );
+
+                setInitialCameraEnabled(
+                    options.cameraEnabled ??
+                        true
+                );
+
                 setConnectionStatus(
                     "Requesting access..."
                 );
 
-                /*
-                 * Only the creator's ORIGINAL TAB will have this
-                 * token (sessionStorage, scoped per tab — see the
-                 * matching setItem calls above for why).
-                 */
                 const hostToken =
                     sessionStorage.getItem(
                         `aircanvas-host-${roomId}`
@@ -1954,7 +2495,7 @@ function App() {
                                 {
                                     roomId,
                                     participantName:
-                                        participantName.trim(),
+                                        trimmedName,
                                     hostToken:
                                         hostToken ||
                                         undefined,
@@ -2012,10 +2553,6 @@ function App() {
             }
         };
 
-    /* =====================================================
-       CONNECTED
-    ===================================================== */
-
     const handleConnected =
         () => {
             console.log(
@@ -2028,10 +2565,6 @@ function App() {
 
             setError("");
         };
-
-    /* =====================================================
-       LIVEKIT ERROR
-    ===================================================== */
 
     const handleLiveKitError =
         (liveKitError) => {
@@ -2049,10 +2582,6 @@ function App() {
                     "LiveKit could not connect."
             );
         };
-
-    /* =====================================================
-       MEDIA FAILURE
-    ===================================================== */
 
     const handleMediaDeviceFailure =
         (failure, kind) => {
@@ -2078,24 +2607,8 @@ function App() {
             );
         };
 
-    /* =====================================================
-       DISCONNECTED
-    ===================================================== */
-
     const handleDisconnected =
         (reason) => {
-            // TEMP DIAGNOSTIC — remove once the "exited after chat" bug is found
-            console.warn(
-                "[DIAGNOSTIC][DISCONNECTED]",
-                "reason code:",
-                reason,
-                "reason name:",
-                DisconnectReason[reason] ||
-                    "UNKNOWN",
-                "at:",
-                new Date().toISOString()
-            );
-
             console.warn(
                 "LIVEKIT DISCONNECTED:",
                 reason
@@ -2105,106 +2618,6 @@ function App() {
                 "Disconnected"
             );
         };
-
-    /* =====================================================
-       TEMP DIAGNOSTIC — room/window level listeners
-       (remove this whole block once the "exited after chat"
-       bug is found)
-    ===================================================== */
-
-    useEffect(() => {
-        const logState = () => {
-            console.warn(
-                "[DIAGNOSTIC][ConnectionStateChanged]",
-                room.state,
-                "at:",
-                new Date().toISOString()
-            );
-        };
-
-        const logReconnecting = () => {
-            console.warn(
-                "[DIAGNOSTIC][Reconnecting]",
-                "at:",
-                new Date().toISOString()
-            );
-        };
-
-        const logSignalReconnecting = () => {
-            console.warn(
-                "[DIAGNOSTIC][SignalReconnecting]",
-                "at:",
-                new Date().toISOString()
-            );
-        };
-
-        const logWindowError = (event) => {
-            console.error(
-                "[DIAGNOSTIC][window error]",
-                event.message,
-                event.error
-            );
-        };
-
-        const logUnhandledRejection = (
-            event
-        ) => {
-            console.error(
-                "[DIAGNOSTIC][unhandled rejection]",
-                event.reason
-            );
-        };
-
-        room.on(
-            RoomEvent.ConnectionStateChanged,
-            logState
-        );
-        room.on(
-            RoomEvent.Reconnecting,
-            logReconnecting
-        );
-        room.on(
-            RoomEvent.SignalReconnecting,
-            logSignalReconnecting
-        );
-
-        window.addEventListener(
-            "error",
-            logWindowError
-        );
-        window.addEventListener(
-            "unhandledrejection",
-            logUnhandledRejection
-        );
-
-        return () => {
-            room.off(
-                RoomEvent.ConnectionStateChanged,
-                logState
-            );
-            room.off(
-                RoomEvent.Reconnecting,
-                logReconnecting
-            );
-            room.off(
-                RoomEvent.SignalReconnecting,
-                logSignalReconnecting
-            );
-
-            window.removeEventListener(
-                "error",
-                logWindowError
-            );
-            window.removeEventListener(
-                "unhandledrejection",
-                logUnhandledRejection
-            );
-        };
-    }, [room]);
-
-    /* =====================================================
-       LEAVE
-    ===================================================== */
 
     const leaveMeeting =
         () => {
@@ -2219,6 +2632,9 @@ function App() {
 
             setIsHost(false);
 
+            setInitialMicEnabled(true);
+            setInitialCameraEnabled(true);
+
             window.history.pushState(
                 {},
                 "",
@@ -2227,10 +2643,6 @@ function App() {
 
             setRoomId(null);
         };
-
-    /* =====================================================
-       REAL MEETING
-    ===================================================== */
 
     if (
         token &&
@@ -2243,8 +2655,8 @@ function App() {
                     token={token}
                     serverUrl={serverUrl}
                     connect={true}
-                    audio={true}
-                    video={true}
+                    audio={initialMicEnabled}
+                    video={initialCameraEnabled}
                     onConnected={
                         handleConnected
                     }
@@ -2267,6 +2679,12 @@ function App() {
                             leaveMeeting
                         }
                         isHost={isHost}
+                        initialMicEnabled={
+                            initialMicEnabled
+                        }
+                        initialCameraEnabled={
+                            initialCameraEnabled
+                        }
                     />
                 </LiveKitRoom>
 
@@ -2280,118 +2698,26 @@ function App() {
         );
     }
 
-    /* =====================================================
-       JOIN SCREEN
-    ===================================================== */
-
     if (roomId) {
         return (
-            <div className="landing-page">
+            <JoinLobby
+                roomId={roomId}
+                error={error}
+                loading={loading}
+                onBack={() => {
+                    window.history.pushState(
+                        {},
+                        "",
+                        "/"
+                    );
 
-                <div className="join-card">
-
-                    <div className="large-brand-icon">
-                        ✋
-                    </div>
-
-                    <h1>
-                        Join AirCanvas Meet
-                    </h1>
-
-                    <p className="subtitle">
-                        Join your online meeting
-                    </p>
-
-                    <div className="room-id-box">
-
-                        <span>
-                            Meeting ID
-                        </span>
-
-                        <strong>
-                            {roomId}
-                        </strong>
-
-                    </div>
-
-                    <label>
-                        Your name
-                    </label>
-
-                    <input
-                        type="text"
-                        placeholder="Enter your name"
-                        value={
-                            participantName
-                        }
-                        onChange={(
-                            event
-                        ) =>
-                            setParticipantName(
-                                event.target
-                                    .value
-                            )
-                        }
-                        onKeyDown={(
-                            event
-                        ) => {
-                            if (
-                                event.key ===
-                                "Enter"
-                            ) {
-                                joinMeeting();
-                            }
-                        }}
-                    />
-
-                    {error && (
-                        <div className="error-message">
-                            {error}
-                        </div>
-                    )}
-
-                    <button
-                        className="primary-button"
-                        onClick={
-                            joinMeeting
-                        }
-                        disabled={
-                            loading
-                        }
-                    >
-                        {loading
-                            ? "Connecting..."
-                            : "Join Meeting"}
-                    </button>
-
-                    <button
-                        className="back-button"
-                        onClick={() => {
-                            window.history.pushState(
-                                {},
-                                "",
-                                "/"
-                            );
-
-                            setRoomId(
-                                null
-                            );
-
-                            setError("");
-                        }}
-                    >
-                        ← Back
-                    </button>
-
-                </div>
-
-            </div>
+                    setRoomId(null);
+                    setError("");
+                }}
+                onJoin={joinMeeting}
+            />
         );
     }
-
-    /* =====================================================
-       HOME
-    ===================================================== */
 
     return (
         <div className="landing-page">
