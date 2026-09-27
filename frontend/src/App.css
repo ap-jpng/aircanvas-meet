@@ -280,7 +280,18 @@ input,
 
 .meeting-app {
     width: 100%;
+    /*
+     * MOBILE FIX: plain 100vh includes space hidden behind the
+     * mobile browser's address bar, which was pushing the bottom
+     * control bar off-screen. Each line below is a progressively
+     * better fallback — browsers override with whichever later line
+     * they understand, so old browsers keep line 1, browsers running
+     * our --vh JS fix (see App.jsx) get line 2, and modern browsers
+     * that support dvh natively get the most accurate line 3.
+     */
     height: 100vh;
+    height: calc(var(--vh, 1vh) * 100);
+    height: 100dvh;
     min-height: 600px;
     overflow: hidden;
     background: #080c15;
@@ -288,7 +299,10 @@ input,
 
 .meeting-room {
     width: 100%;
+    /* See .meeting-app above for why three fallback lines. */
     height: 100vh;
+    height: calc(var(--vh, 1vh) * 100);
+    height: 100dvh;
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -565,16 +579,7 @@ input,
     border: none;
     border-radius: 8px;
     background: transparent;
-    /*
-     * TEMPORARY CANARY COLOR: bright cyan instead of the old grey.
-     * This has no functional purpose — it exists ONLY so a screenshot
-     * from any device can immediately confirm whether this updated
-     * CSS file has actually loaded. If the ✕ still looks grey/white
-     * on a device, that device is running a cached/stale build and no
-     * code fix will show up there until that cache is cleared. Revert
-     * to color: #9ba7b9 once mobile testing is done.
-     */
-    color: #25d3ee;
+    color: #9ba7b9;
     cursor: pointer;
     font-size: 16px;
     /*

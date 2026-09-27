@@ -1701,6 +1701,57 @@ function App() {
         useState(false);
 
     /* =====================================================
+       MOBILE VIEWPORT-HEIGHT FIX
+    ===================================================== */
+
+    /*
+     * On mobile browsers, `100vh` in CSS includes space that's
+     * actually hidden behind the address bar / browser chrome, so
+     * anything relying on 100vh (like .meeting-app / .meeting-room)
+     * can be taller than what's actually visible — pushing the
+     * bottom control bar (mute, camera, leave, etc.) off-screen.
+     * This measures the REAL visible height with JS and exposes it
+     * as the --vh CSS custom property, which App.css uses instead of
+     * a raw 100vh wherever the mobile bug would otherwise cut off
+     * content. Modern browsers that support `100dvh` natively will
+     * use that instead (see App.css) and this becomes a no-op there,
+     * but it's kept as a robust fallback for browsers that don't.
+     */
+    useEffect(() => {
+        const setViewportHeightVar =
+            () => {
+                document.documentElement.style.setProperty(
+                    "--vh",
+                    `${window.innerHeight * 0.01}px`
+                );
+            };
+
+        setViewportHeightVar();
+
+        window.addEventListener(
+            "resize",
+            setViewportHeightVar
+        );
+
+        window.addEventListener(
+            "orientationchange",
+            setViewportHeightVar
+        );
+
+        return () => {
+            window.removeEventListener(
+                "resize",
+                setViewportHeightVar
+            );
+
+            window.removeEventListener(
+                "orientationchange",
+                setViewportHeightVar
+            );
+        };
+    }, []);
+
+    /* =====================================================
        DEFENSIVE VIEWPORT META CHECK
     ===================================================== */
 
