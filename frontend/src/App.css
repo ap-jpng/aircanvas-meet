@@ -81,6 +81,7 @@ body {
     font-size: 31px;
     font-weight: 700;
     letter-spacing: -0.7px;
+    color: #f5f7fb;
 }
 
 .subtitle {
@@ -260,6 +261,7 @@ body {
     font-size: 26px;
     font-weight: 700;
     letter-spacing: -0.5px;
+    color: #f5f7fb;
 }
 
 .lobby-card label {
@@ -1397,6 +1399,12 @@ body[data-theme="light"] .lobby-card {
     box-shadow:
         0 25px 80px rgba(20, 30, 50, 0.1),
         0 0 0 1px rgba(20, 30, 50, 0.02);
+}
+
+body[data-theme="light"] .home-card h1,
+body[data-theme="light"] .join-card h1,
+body[data-theme="light"] .lobby-card h1 {
+    color: #16202f;
 }
 
 body[data-theme="light"] .subtitle {
