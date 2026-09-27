@@ -1756,3 +1756,48 @@ body[data-theme="light"] .theme-toggle-fab:hover {
         flex-direction: column;
     }
 }
+
+/* =========================================================
+   SCREEN SHARE
+   Additive only — does not modify camera tile styles/layout.
+========================================================= */
+
+.screen-share-grid {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+.screen-share-tile-wrapper {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    max-height: 60vh;
+    overflow: hidden;
+    border-radius: 12px;
+    background: #0b111d;
+    border: 1px solid #29344a;
+}
+
+.screen-share-tile-wrapper .custom-participant-tile {
+    width: 100%;
+    height: 100%;
+}
+
+.screen-share-tile-wrapper .custom-participant-tile video {
+    object-fit: contain;
+    background: #000;
+}
+
+body[data-theme="light"] .screen-share-tile-wrapper {
+    background: #dfe4ee;
+    border-color: #d6dce7;
+}
+
+@media (max-width: 700px) {
+    .screen-share-tile-wrapper {
+        max-height: 40vh;
+    }
+}

@@ -81,6 +81,22 @@ function MeetingRoom({
         },
     ]);
 
+    /*
+     * FIX (screen share): screen-share tracks were never subscribed
+     * to anywhere. cameraTracks only ever asks LiveKit for
+     * Track.Source.Camera, so when a participant called
+     * setScreenShareEnabled(true) the track WAS published, but no
+     * component ever mapped over it — not even for the sharer's own
+     * remote view on other browsers. This is a separate, additive
+     * subscription; it doesn't touch cameraTracks or the grid below.
+     */
+    const screenShareTracks = useTracks([
+        {
+            source: Track.Source.ScreenShare,
+            withPlaceholder: false,
+        },
+    ]);
+
     const [activePanel, setActivePanel] =
         useState(null);
 
@@ -1007,6 +1023,40 @@ function MeetingRoom({
             <div className="meeting-body">
 
                 <main className="video-area">
+
+                    {/*
+                     * FIX (screen share): render any active screen
+                     * shares in their own row, above the camera grid.
+                     * screenShareTracks is a separate useTracks
+                     * subscription (Track.Source.ScreenShare) added
+                     * above — this does not alter the camera grid,
+                     * AirCanvas, or anything else below.
+                     */}
+                    {screenShareTracks.length > 0 && (
+                        <div className="screen-share-grid">
+                            {screenShareTracks.map(
+                                (track) => (
+                                    <div
+                                        className="screen-share-tile-wrapper"
+                                        key={`${track.participant.identity}-screen`}
+                                    >
+                                        <ParticipantTile
+                                            trackRef={track}
+                                            className="custom-participant-tile screen-share-tile"
+                                        />
+
+                                        <div className="participant-overlay">
+                                            <div className="participant-name">
+                                                {(track.participant.name ||
+                                                    track.participant.identity)}
+                                                's screen
+                                            </div>
+                                        </div>
+                                    </div>
+                                )
+                            )}
+                        </div>
+                    )}
 
                     <div
                         className={`participant-grid participant-count-${Math.min(
