@@ -1156,6 +1156,52 @@ function MeetingRoom({
         };
     }, [room]);
 
+    /*
+     * A participant's real name (and, sometimes, their metadata)
+     * can arrive slightly AFTER they're first seen — recordJoin()
+     * above may have only had their bare identity to fall back on
+     * at that exact moment. `participants` (from useParticipants(),
+     * already subscribed above) re-renders live as LiveKit fills
+     * that info in, so keep each attendance row's name/email in
+     * sync with it whenever it changes, rather than trusting
+     * whatever was known at the single instant they joined.
+     */
+    useEffect(() => {
+        participants.forEach(
+            (participant) => {
+                const record =
+                    attendanceLogRef.current.get(
+                        participant.identity
+                    );
+
+                if (!record) {
+                    return;
+                }
+
+                const metadata =
+                    parseParticipantMetadata(
+                        participant
+                    );
+
+                const freshName =
+                    metadata.name ||
+                    participant.name;
+
+                if (freshName) {
+                    record.name = freshName;
+                }
+
+                if (
+                    !record.email &&
+                    metadata.email
+                ) {
+                    record.email =
+                        metadata.email;
+                }
+            }
+        );
+    }, [participants]);
+
     /* =====================================================
        GENERATE ATTENDANCE REPORT (PDF, host only)
     ===================================================== */
@@ -1224,8 +1270,41 @@ function MeetingRoom({
                             record.joinedAt.getTime()) /
                         1000;
 
+                    /*
+                     * Belt-and-suspenders name resolution: look up the
+                     * LIVE participant object (if they're still in the
+                     * meeting) and re-derive their name from it right
+                     * now, instead of trusting whatever the cached
+                     * record picked up earlier. "Unknown participant"
+                     * is the last-resort fallback so the cell is never
+                     * truly empty even if every other source is blank.
+                     */
+                    const liveParticipant =
+                        participants.find(
+                            (
+                                candidate
+                            ) =>
+                                candidate.identity ===
+                                record.identity
+                        );
+
+                    const liveMetadata =
+                        liveParticipant
+                            ? parseParticipantMetadata(
+                                  liveParticipant
+                              )
+                            : {};
+
+                    const resolvedName =
+                        liveMetadata.name ||
+                        liveParticipant?.name ||
+                        record.name ||
+                        record.identity ||
+                        "Unknown participant";
+
                     return {
                         ...record,
+                        name: resolvedName,
                         leftAt,
                         stillHere:
                             !record.leftAt,
