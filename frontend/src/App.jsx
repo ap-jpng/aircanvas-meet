@@ -1,5 +1,6 @@
 import {
     useEffect,
+    useRef,
     useState,
 } from "react";
 
@@ -53,60 +54,6 @@ function sendAirCanvasMessage(room, message) {
     }
 }
 
-/*
- * Explicitly ask the browser for camera + microphone access BEFORE
- * we ever try to connect to LiveKit. Without this, the permission
- * prompt (if it appears at all) happens implicitly and unpredictably
- * once LiveKitRoom starts trying to publish tracks — which can look
- * like a silent failure if the user misses it or it never surfaces
- * clearly. Asking up front, with our own loading message, means the
- * user always sees a clear "Allow camera and microphone?" prompt at
- * the moment they click Join, and we can show a clear error message
- * if they deny it instead of a confusing generic connection failure.
- *
- * We stop the tracks immediately after — this call is ONLY to
- * trigger/confirm the permission grant. LiveKitRoom requests and
- * manages its own actual camera/mic tracks separately.
- */
-async function requestMediaPermissions() {
-    if (
-        !navigator.mediaDevices ||
-        !navigator.mediaDevices.getUserMedia
-    ) {
-        // Very old/unsupported browser — let LiveKit's own
-        // connection attempt surface whatever error applies.
-        return { granted: true };
-    }
-
-    try {
-        const stream =
-            await navigator.mediaDevices.getUserMedia(
-                {
-                    audio: true,
-                    video: true,
-                }
-            );
-
-        stream
-            .getTracks()
-            .forEach((track) =>
-                track.stop()
-            );
-
-        return { granted: true };
-    } catch (error) {
-        console.error(
-            "Media permission error:",
-            error
-        );
-
-        return {
-            granted: false,
-            error,
-        };
-    }
-}
-
 /* =========================================================
    MEETING ROOM
 ========================================================= */
@@ -116,6 +63,8 @@ function MeetingRoom({
     connectionStatus,
     onLeave,
     isHost,
+    initialMicEnabled,
+    initialCameraEnabled,
 }) {
     const room = useRoomContext();
 
@@ -136,10 +85,10 @@ function MeetingRoom({
         useState(false);
 
     const [micEnabled, setMicEnabled] =
-        useState(true);
+        useState(initialMicEnabled);
 
     const [cameraEnabled, setCameraEnabled] =
-        useState(true);
+        useState(initialCameraEnabled);
 
     const [screenSharing, setScreenSharing] =
         useState(false);
@@ -767,10 +716,6 @@ function MeetingRoom({
                     "Share meeting error:",
                     error
                 );
-
-                setError(
-                    "Unable to copy the meeting link. Please copy the URL from the browser."
-                );
             }
         };
 
@@ -943,10 +888,6 @@ function MeetingRoom({
                                                         )
                                                     )
                                                 }
-                                                mirror={
-                                                    track.participant.identity ===
-                                                    room.localParticipant.identity
-                                                }
                                                 showOverlay={
                                                     track.participant.identity ===
                                                     airCanvasUser
@@ -1057,35 +998,12 @@ function MeetingRoom({
                             </div>
 
                             <button
-                                type="button"
                                 className="close-panel"
-                                aria-label="Close panel"
                                 onClick={() =>
                                     setActivePanel(
                                         null
                                     )
                                 }
-                                onPointerUp={(
-                                    event
-                                ) => {
-                                    /*
-                                     * Belt-and-suspenders for mobile:
-                                     * onClick alone has occasionally
-                                     * been reported as unreliable on
-                                     * some mobile browsers for small
-                                     * targets. onPointerUp fires for
-                                     * both touch and mouse and closes
-                                     * the panel directly, so the panel
-                                     * closes the instant the finger
-                                     * lifts rather than waiting on a
-                                     * synthetic click that could be
-                                     * dropped.
-                                     */
-                                    event.preventDefault();
-                                    setActivePanel(
-                                        null
-                                    );
-                                }}
                             >
                                 ✕
                             </button>
@@ -1661,6 +1579,332 @@ function ControlButton({
 }
 
 /* =========================================================
+   JOIN LOBBY
+   A pre-join screen with a live camera/mic preview and toggle
+   buttons, in the style of Zoom/Meet, instead of dropping the
+   user straight into a browser permission popup.
+
+   This preview is a PLAIN getUserMedia stream, deliberately kept
+   separate from LiveKit. LiveKit requests its own camera/mic
+   tracks once we actually connect (see the "REAL MEETING" render
+   branch below, which passes the chosen initial mic/camera state
+   into <LiveKitRoom>). We release this preview stream right
+   before handing off to LiveKit so the two never fight over the
+   same device at once.
+========================================================= */
+
+function JoinLobby({
+    roomId,
+    error,
+    loading,
+    onBack,
+    onJoin,
+}) {
+    const videoRef = useRef(null);
+    const streamRef = useRef(null);
+
+    const [participantName, setParticipantName] =
+        useState("");
+
+    const [micEnabled, setMicEnabled] =
+        useState(true);
+
+    const [cameraEnabled, setCameraEnabled] =
+        useState(true);
+
+    const [previewError, setPreviewError] =
+        useState("");
+
+    /*
+     * Start the preview as soon as the lobby mounts, and always
+     * release the camera/mic when it unmounts (whether that's
+     * because the user hit Back, or because they successfully
+     * joined and this screen is being replaced by the meeting).
+     */
+    useEffect(() => {
+        let cancelled = false;
+
+        const startPreview = async () => {
+            try {
+                const stream =
+                    await navigator.mediaDevices.getUserMedia(
+                        {
+                            audio: true,
+                            video: true,
+                        }
+                    );
+
+                if (cancelled) {
+                    stream
+                        .getTracks()
+                        .forEach((track) =>
+                            track.stop()
+                        );
+
+                    return;
+                }
+
+                streamRef.current = stream;
+
+                if (videoRef.current) {
+                    videoRef.current.srcObject =
+                        stream;
+                }
+            } catch (err) {
+                console.error(
+                    "Lobby preview error:",
+                    err
+                );
+
+                if (!cancelled) {
+                    setPreviewError(
+                        "Could not access your camera or microphone. You can still join — just check your browser permissions first."
+                    );
+                }
+            }
+        };
+
+        startPreview();
+
+        return () => {
+            cancelled = true;
+
+            if (streamRef.current) {
+                streamRef.current
+                    .getTracks()
+                    .forEach((track) =>
+                        track.stop()
+                    );
+
+                streamRef.current = null;
+            }
+        };
+    }, []);
+
+    const toggleMic = () => {
+        const stream = streamRef.current;
+        const nextEnabled = !micEnabled;
+
+        if (stream) {
+            stream
+                .getAudioTracks()
+                .forEach((track) => {
+                    track.enabled =
+                        nextEnabled;
+                });
+        }
+
+        setMicEnabled(nextEnabled);
+    };
+
+    const toggleCamera = () => {
+        const stream = streamRef.current;
+        const nextEnabled = !cameraEnabled;
+
+        if (stream) {
+            stream
+                .getVideoTracks()
+                .forEach((track) => {
+                    track.enabled =
+                        nextEnabled;
+                });
+        }
+
+        setCameraEnabled(nextEnabled);
+    };
+
+    const handleJoin = () => {
+        if (!participantName.trim()) {
+            return;
+        }
+
+        /*
+         * Release the preview stream right away. LiveKitRoom will
+         * request its own camera/mic tracks the moment it connects,
+         * and holding onto this one too can make some browsers show
+         * a stale preview frame or double-prompt for permissions.
+         */
+        if (streamRef.current) {
+            streamRef.current
+                .getTracks()
+                .forEach((track) =>
+                    track.stop()
+                );
+
+            streamRef.current = null;
+        }
+
+        onJoin(participantName, {
+            micEnabled,
+            cameraEnabled,
+        });
+    };
+
+    return (
+        <div className="landing-page">
+
+            <div className="lobby-card">
+
+                <h1>
+                    Ready to join?
+                </h1>
+
+                <p className="subtitle">
+                    Check your camera and
+                    mic before you join.
+                </p>
+
+                <div className="lobby-preview-wrap">
+
+                    <video
+                        ref={videoRef}
+                        muted
+                        playsInline
+                        autoPlay
+                        className="lobby-preview-video"
+                        style={{
+                            visibility:
+                                cameraEnabled
+                                    ? "visible"
+                                    : "hidden",
+                        }}
+                    />
+
+                    {!cameraEnabled && (
+                        <div className="lobby-preview-placeholder">
+                            <div className="lobby-preview-avatar">
+                                {(
+                                    participantName ||
+                                    "U"
+                                )
+                                    .charAt(0)
+                                    .toUpperCase()}
+                            </div>
+                        </div>
+                    )}
+
+                    <div className="lobby-preview-controls">
+
+                        <button
+                            type="button"
+                            className={`lobby-toggle-button ${
+                                micEnabled
+                                    ? ""
+                                    : "off"
+                            }`}
+                            onClick={
+                                toggleMic
+                            }
+                            title={
+                                micEnabled
+                                    ? "Mute microphone"
+                                    : "Unmute microphone"
+                            }
+                        >
+                            {micEnabled
+                                ? "🎤"
+                                : "🔇"}
+                        </button>
+
+                        <button
+                            type="button"
+                            className={`lobby-toggle-button ${
+                                cameraEnabled
+                                    ? ""
+                                    : "off"
+                            }`}
+                            onClick={
+                                toggleCamera
+                            }
+                            title={
+                                cameraEnabled
+                                    ? "Turn off camera"
+                                    : "Turn on camera"
+                            }
+                        >
+                            {cameraEnabled
+                                ? "📹"
+                                : "📹̸"}
+                        </button>
+
+                    </div>
+
+                </div>
+
+                <div className="room-id-box">
+
+                    <span>
+                        Meeting ID
+                    </span>
+
+                    <strong>
+                        {roomId}
+                    </strong>
+
+                </div>
+
+                <label>
+                    Your name
+                </label>
+
+                <input
+                    type="text"
+                    placeholder="Enter your name"
+                    value={
+                        participantName
+                    }
+                    onChange={(event) =>
+                        setParticipantName(
+                            event.target
+                                .value
+                        )
+                    }
+                    onKeyDown={(event) => {
+                        if (
+                            event.key ===
+                            "Enter"
+                        ) {
+                            handleJoin();
+                        }
+                    }}
+                />
+
+                {previewError && (
+                    <div className="error-message">
+                        {previewError}
+                    </div>
+                )}
+
+                {error && (
+                    <div className="error-message">
+                        {error}
+                    </div>
+                )}
+
+                <button
+                    className="primary-button"
+                    onClick={handleJoin}
+                    disabled={loading}
+                >
+                    {loading
+                        ? "Connecting..."
+                        : "Join Meeting"}
+                </button>
+
+                <button
+                    className="back-button"
+                    onClick={onBack}
+                >
+                    ← Back
+                </button>
+
+            </div>
+
+        </div>
+    );
+}
+
+/* =========================================================
    MAIN APP
 ========================================================= */
 
@@ -1700,112 +1944,19 @@ function App() {
     const [isHost, setIsHost] =
         useState(false);
 
-    /* =====================================================
-       MOBILE VIEWPORT-HEIGHT FIX
-    ===================================================== */
-
     /*
-     * On mobile browsers, `100vh` in CSS includes space that's
-     * actually hidden behind the address bar / browser chrome, so
-     * anything relying on 100vh (like .meeting-app / .meeting-room)
-     * can be taller than what's actually visible — pushing the
-     * bottom control bar (mute, camera, leave, etc.) off-screen.
-     * This measures the REAL visible height with JS and exposes it
-     * as the --vh CSS custom property, which App.css uses instead of
-     * a raw 100vh wherever the mobile bug would otherwise cut off
-     * content. Modern browsers that support `100dvh` natively will
-     * use that instead (see App.css) and this becomes a no-op there,
-     * but it's kept as a robust fallback for browsers that don't.
+     * Chosen on the pre-join lobby screen, and used as the initial
+     * mic/camera state when we actually connect to LiveKit.
      */
-    useEffect(() => {
-        const setViewportHeightVar =
-            () => {
-                document.documentElement.style.setProperty(
-                    "--vh",
-                    `${window.innerHeight * 0.01}px`
-                );
-            };
+    const [
+        initialMicEnabled,
+        setInitialMicEnabled,
+    ] = useState(true);
 
-        setViewportHeightVar();
-
-        window.addEventListener(
-            "resize",
-            setViewportHeightVar
-        );
-
-        window.addEventListener(
-            "orientationchange",
-            setViewportHeightVar
-        );
-
-        return () => {
-            window.removeEventListener(
-                "resize",
-                setViewportHeightVar
-            );
-
-            window.removeEventListener(
-                "orientationchange",
-                setViewportHeightVar
-            );
-        };
-    }, []);
-
-    /* =====================================================
-       DEFENSIVE VIEWPORT META CHECK
-    ===================================================== */
-
-    /*
-     * All of this app's mobile-specific CSS (@media max-width: 900px
-     * / 700px in App.css) depends on the browser reporting the REAL
-     * device width as the CSS layout viewport. Without
-     * `<meta name="viewport" content="width=device-width, ...">` in
-     * index.html, many mobile browsers instead assume a fake ~980px
-     * "desktop" viewport, so those media queries never match no
-     * matter how narrow the physical screen is — the layout silently
-     * falls back to the desktop side-by-side panel/video layout
-     * (exactly the "chat squeezes the video" symptom).
-     *
-     * This is a defensive belt-and-suspenders check: if index.html is
-     * ever missing/mismatched, it corrects it at runtime instead of
-     * silently breaking every mobile layout rule in the app.
-     */
-    useEffect(() => {
-        const existing = document.querySelector(
-            'meta[name="viewport"]'
-        );
-
-        const desiredContent =
-            "width=device-width, initial-scale=1, viewport-fit=cover";
-
-        if (!existing) {
-            const meta =
-                document.createElement("meta");
-
-            meta.setAttribute(
-                "name",
-                "viewport"
-            );
-
-            meta.setAttribute(
-                "content",
-                desiredContent
-            );
-
-            document.head.appendChild(
-                meta
-            );
-        } else if (
-            !existing
-                .getAttribute("content")
-                ?.includes("width=device-width")
-        ) {
-            existing.setAttribute(
-                "content",
-                desiredContent
-            );
-        }
-    }, []);
+    const [
+        initialCameraEnabled,
+        setInitialCameraEnabled,
+    ] = useState(true);
 
     /* =====================================================
        READ ROOM FROM URL
@@ -1998,13 +2149,20 @@ function App() {
 
     /* =====================================================
        JOIN MEETING
+       Called by the JoinLobby screen once the user has chosen
+       their name and their initial mic/camera state.
     ===================================================== */
 
     const joinMeeting =
-        async () => {
-            if (
-                !participantName.trim()
-            ) {
+        async (
+            name,
+            options = {}
+        ) => {
+            const trimmedName = (
+                name || ""
+            ).trim();
+
+            if (!trimmedName) {
                 setError(
                     "Please enter your name."
                 );
@@ -2022,35 +2180,19 @@ function App() {
                 setLoading(true);
                 setError("");
 
-                /*
-                 * Ask for camera + microphone permission explicitly,
-                 * BEFORE we request a LiveKit token or attempt to
-                 * connect. This guarantees the user sees a clear
-                 * browser permission prompt at the moment they click
-                 * "Join Meeting", instead of it happening implicitly
-                 * (or not at all, on some browsers) once LiveKitRoom
-                 * starts trying to publish tracks after connecting.
-                 */
-                setConnectionStatus(
-                    "Requesting camera & microphone access..."
+                setParticipantName(
+                    trimmedName
                 );
 
-                const permissionResult =
-                    await requestMediaPermissions();
+                setInitialMicEnabled(
+                    options.micEnabled ??
+                        true
+                );
 
-                if (!permissionResult.granted) {
-                    setConnectionStatus(
-                        "Permission denied"
-                    );
-
-                    setError(
-                        "Camera and microphone access is required to join this meeting. Please allow access in your browser settings and try again."
-                    );
-
-                    setLoading(false);
-
-                    return;
-                }
+                setInitialCameraEnabled(
+                    options.cameraEnabled ??
+                        true
+                );
 
                 setConnectionStatus(
                     "Requesting access..."
@@ -2079,7 +2221,7 @@ function App() {
                                 {
                                     roomId,
                                     participantName:
-                                        participantName.trim(),
+                                        trimmedName,
                                     hostToken:
                                         hostToken ||
                                         undefined,
@@ -2236,6 +2378,9 @@ function App() {
 
             setIsHost(false);
 
+            setInitialMicEnabled(true);
+            setInitialCameraEnabled(true);
+
             window.history.pushState(
                 {},
                 "",
@@ -2260,8 +2405,8 @@ function App() {
                     token={token}
                     serverUrl={serverUrl}
                     connect={true}
-                    audio={true}
-                    video={true}
+                    audio={initialMicEnabled}
+                    video={initialCameraEnabled}
                     onConnected={
                         handleConnected
                     }
@@ -2284,6 +2429,12 @@ function App() {
                             leaveMeeting
                         }
                         isHost={isHost}
+                        initialMicEnabled={
+                            initialMicEnabled
+                        }
+                        initialCameraEnabled={
+                            initialCameraEnabled
+                        }
                     />
                 </LiveKitRoom>
 
@@ -2298,114 +2449,27 @@ function App() {
     }
 
     /* =====================================================
-       JOIN SCREEN
+       PRE-JOIN LOBBY
     ===================================================== */
 
     if (roomId) {
         return (
-            <div className="landing-page">
+            <JoinLobby
+                roomId={roomId}
+                error={error}
+                loading={loading}
+                onBack={() => {
+                    window.history.pushState(
+                        {},
+                        "",
+                        "/"
+                    );
 
-                <div className="join-card">
-
-                    <div className="large-brand-icon">
-                        ✋
-                    </div>
-
-                    <h1>
-                        Join AirCanvas Meet
-                    </h1>
-
-                    <p className="subtitle">
-                        Join your online meeting
-                    </p>
-
-                    <div className="room-id-box">
-
-                        <span>
-                            Meeting ID
-                        </span>
-
-                        <strong>
-                            {roomId}
-                        </strong>
-
-                    </div>
-
-                    <label>
-                        Your name
-                    </label>
-
-                    <input
-                        type="text"
-                        placeholder="Enter your name"
-                        value={
-                            participantName
-                        }
-                        onChange={(
-                            event
-                        ) =>
-                            setParticipantName(
-                                event.target
-                                    .value
-                            )
-                        }
-                        onKeyDown={(
-                            event
-                        ) => {
-                            if (
-                                event.key ===
-                                "Enter"
-                            ) {
-                                joinMeeting();
-                            }
-                        }}
-                    />
-
-                    {error && (
-                        <div className="error-message">
-                            {error}
-                        </div>
-                    )}
-
-                    <button
-                        className="primary-button"
-                        onClick={
-                            joinMeeting
-                        }
-                        disabled={
-                            loading
-                        }
-                    >
-                        {loading
-                            ? connectionStatus ===
-                              "Requesting camera & microphone access..."
-                                ? "Requesting camera & mic access..."
-                                : "Connecting..."
-                            : "Join Meeting"}
-                    </button>
-
-                    <button
-                        className="back-button"
-                        onClick={() => {
-                            window.history.pushState(
-                                {},
-                                "",
-                                "/"
-                            );
-
-                            setRoomId(
-                                null
-                            );
-
-                            setError("");
-                        }}
-                    >
-                        ← Back
-                    </button>
-
-                </div>
-
-            </div>
+                    setRoomId(null);
+                    setError("");
+                }}
+                onJoin={joinMeeting}
+            />
         );
     }
 
