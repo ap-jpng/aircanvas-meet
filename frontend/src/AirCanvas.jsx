@@ -11,6 +11,9 @@ function featuresFromLandmarks(landmarks, mirrorX = false) {
     const features = [];
 
     for (const point of landmarks) {
+        // The trained model is right-hand oriented.  For a left hand,
+        // reflecting X around the wrist converts it into the same canonical
+        // shape without changing the user's actual drawing coordinates.
         const relativeX = point.x - wrist.x;
         const canonicalX = mirrorX
             ? -relativeX
@@ -61,6 +64,12 @@ function predictKNN(features) {
     };
 }
 
+/*
+ * The original training set is right-hand oriented.  We therefore classify
+ * both the detected hand and its X-reflected version and use whichever is
+ * closer to the trained gesture space.  This makes the same four gestures
+ * work naturally for left- and right-handed writers without retraining.
+ */
 function predictHandGesture(landmarks) {
     const normalFeatures =
         featuresFromLandmarks(landmarks, false);
@@ -97,6 +106,14 @@ function smoothPoint(previous, current, alpha = 0.58) {
     };
 }
 
+/*
+ * MediaPipe coordinates are normalized against the actual camera frame.
+ * ParticipantTile normally uses object-fit: cover, so simply multiplying
+ * x/y by the canvas size can be wrong when the aspect ratios differ.
+ *
+ * This function reproduces the object-fit: cover transform so that the
+ * annotation stays on the same visual position as the hand/video.
+ */
 function normalizedToCanvas(
     point,
     canvasWidth,
@@ -166,6 +183,13 @@ function getCanvasPoint(
     );
 }
 
+/*
+ * `color` is new: both draw helpers now accept an explicit stroke/fill
+ * color instead of the old hardcoded "#00ff66". Falling back to
+ * "#00ff66" when color is missing keeps old history entries (drawn
+ * before this feature existed, with no `color` field) rendering
+ * exactly as they always did.
+ */
 function drawLine(
     ctx,
     from,
@@ -236,15 +260,18 @@ export default function AirCanvas({
     isController = false,
     mirror = false,
     showOverlay = true,
+    /*
+     * NEW: the writer's chosen marker color/size. Only meaningful on
+     * the instance where isController is true — that's the only place
+     * that ever calls processGesture and therefore the only place
+     * that ever originates a NEW stroke. Every other instance (other
+     * tiles, other participants' browsers) only ever replays events
+     * it received or read from history, and those events now carry
+     * their own `color`/`width`, so they render correctly regardless
+     * of what this prop happens to be set to locally.
+     */
     markerColor = "#00ff66",
     markerWidth = 4,
-    /*
-     * NEW: eraser thickness, independently adjustable from the marker's
-     * draw width. Used ONLY for the ERASE gesture. Defaults to 68 --
-     * the value that used to be hardcoded here -- so anyone not using
-     * the new eraser-size control gets the exact same eraser feel as
-     * before.
-     */
     eraserWidth = 68,
 }) {
     const canvasTileIdentity =
@@ -293,6 +320,15 @@ export default function AirCanvas({
     const mountedRef =
         useRef(true);
 
+    /*
+     * processGesture is invoked from inside a MediaPipe callback that
+     * was registered once (see the "Load legacy MediaPipe Hands"
+     * effect below) and is not re-created every time markerColor/
+     * markerWidth change. Reading them through a ref (kept fresh by
+     * the two tiny effects right below) means changing the color or
+     * size mid-meeting takes effect on the very next frame, with no
+     * need to tear down and reinitialize MediaPipe.
+     */
     const markerColorRef =
         useRef(markerColor);
 
@@ -327,6 +363,17 @@ export default function AirCanvas({
                     message.targetIdentity ||
                     canvasTileIdentity,
             };
+
+            /* [AC-SEND] Temporary diagnostic log — remove once the
+               drawing-propagation bug is confirmed fixed. */
+            console.log(
+                "[AC-SEND]",
+                fullMessage.event?.type,
+                "from",
+                fullMessage.sourceIdentity,
+                "target",
+                fullMessage.targetIdentity
+            );
 
             const payload =
                 new TextEncoder().encode(
@@ -401,7 +448,25 @@ export default function AirCanvas({
         redrawHistory();
     };
 
+    /*
+     * On mount, ask the owner of this tile for whatever they have
+     * already drawn (see the "history-request" / "history-dump"
+     * handling in the DataReceived effect below). We never need to
+     * request our OWN tile's history — nobody but us could have
+     * drawn on it, so there is nothing anyone else could send back.
+     */
     useEffect(() => {
+        /*
+         * Guard against the mount-time race where this effect can run
+         * before canvasTileIdentity (derived from hostIdentity /
+         * LiveKit participant metadata) has resolved yet. Without this
+         * guard we'd fire a history-request with targetIdentity: null,
+         * which nobody can ever answer — a wasted, silently-dropped
+         * packet. Because the effect's dependency array is
+         * [canvasTileIdentity], simply bailing out here is enough: the
+         * effect automatically re-runs and sends the CORRECT request
+         * the moment canvasTileIdentity resolves to a real identity.
+         */
         if (!canvasTileIdentity) {
             return;
         }
@@ -660,6 +725,12 @@ export default function AirCanvas({
                     landmarks
                 );
 
+            /*
+             * Stabilize the gesture before drawing.  CLEAR gets a slightly
+             * shorter confirmation because a closed fist is intentionally a
+             * discrete command.  DRAW and ERASE need a few frames so brief
+             * MediaPipe pose changes do not break the stroke.
+             */
             if (
                 detectedGesture ===
                 candidateModeRef.current
@@ -760,10 +831,58 @@ export default function AirCanvas({
                 ),
             };
 
+            /*
+             * MIRROR-WRITING CORRECTION.
+             *
+             * MediaPipe reads the RAW, unmirrored camera feed (the
+             * hidden processing <video>, not the visible mirrored
+             * tile). But the writer is watching their OWN mirrored
+             * self-view while drawing, so they naturally move their
+             * real hand in the left-right mirror image of whatever
+             * they intend to write — the same reason people write
+             * backwards on a foggy mirror or a piece of glass. That
+             * means rawPoint.x, exactly as MediaPipe reports it, is
+             * already the mirror image of the intended shape.
+             *
+             * We flip x ONCE here, at the moment of capture, so that
+             * `canonicalPoint` is the correctly-oriented, legible
+             * coordinate. This is now the ONLY point value that ever
+             * goes into smoothing, history, and the network payload
+             * (event.point / event.from / event.to).
+             *
+             * Because the flip already happened here, NOTHING further
+             * down the pipeline — local drawing, remote drawing, or
+             * history replay — should apply any additional mirroring.
+             * Every getCanvasPoint(...) call below now passes `false`
+             * for that reason: the coordinate is already correct for
+             * everyone, writer included.
+             */
             const canonicalPoint = {
                 x: 1 - rawPoint.x,
                 y: rawPoint.y,
             };
+
+            /* [AC-POINT] Temporary diagnostic log — remove once the
+               mirror-writing fix is confirmed on a verified-fresh
+               deploy. Throttled to ~once/sec per browser tab so it
+               doesn't flood the console during continuous drawing. */
+            if (
+                !processGesture._lastLog ||
+                Date.now() - processGesture._lastLog > 1000
+            ) {
+                processGesture._lastLog = Date.now();
+                console.log(
+                    "[AC-POINT]",
+                    "who-drew",
+                    room.localParticipant.identity,
+                    "onTile",
+                    canvasTileIdentity,
+                    "rawX",
+                    rawPoint.x.toFixed(3),
+                    "canonicalX",
+                    canonicalPoint.x.toFixed(3)
+                );
+            }
 
             const point =
                 smoothPoint(
@@ -772,10 +891,12 @@ export default function AirCanvas({
                 );
 
             /*
-             * width now comes from the eraser-specific ref when
-             * erasing, and from the marker-specific ref when drawing --
-             * two independently adjustable sizes instead of one shared
-             * value with a hardcoded eraser fallback.
+             * NEW: width/color now come from the writer's current
+             * choice (via the refs kept fresh above) instead of a
+             * hardcoded "4" / "#00ff66". ERASE keeps its own fixed,
+             * separately-tuned width — the "marker size" control is
+             * only meant to affect the DRAW marker, not the eraser
+             * footprint, so eraser feel is completely unchanged.
              */
             const width =
                 gesture === "ERASE"
@@ -850,6 +971,11 @@ export default function AirCanvas({
                             .y
                 );
 
+            /*
+             * A very large jump means the hand tracking
+             * temporarily lost the finger. Start again
+             * instead of drawing a diagonal across the board.
+             */
             if (
                 distance >
                 0.12
@@ -911,6 +1037,11 @@ export default function AirCanvas({
                 point;
         };
 
+    /*
+     * Receive drawing events from every participant.
+     * Every client renders the same normalized coordinates
+     * over the active participant's video tile.
+     */
     useEffect(() => {
         const handler = (
             payload,
@@ -918,6 +1049,23 @@ export default function AirCanvas({
             _kind,
             topic
         ) => {
+            /* [AC-RECV] Temporary diagnostic log — remove once the
+               drawing-propagation bug is confirmed fixed. Fires for
+               EVERY DataReceived event on this room, regardless of
+               topic, so we can tell whether the packet is arriving
+               on this browser at all. */
+            console.log(
+                "[AC-RECV] raw",
+                {
+                    topic,
+                    from: sourceParticipant?.identity,
+                    myTile: canvasTileIdentity,
+                    showing:
+                        canvasRef.current
+                            ?.style.display,
+                }
+            );
+
             if (
                 topic !== TOPIC
             ) {
@@ -946,11 +1094,43 @@ export default function AirCanvas({
                     return;
                 }
 
+                /* [AC-RECV] Temporary diagnostic log — remove once
+                   the drawing-propagation bug is confirmed fixed. */
+                console.log(
+                    "[AC-RECV] parsed",
+                    event.type,
+                    "src",
+                    message.sourceIdentity,
+                    "eventTarget",
+                    event.targetIdentity,
+                    "myTile",
+                    canvasTileIdentity
+                );
+
+                /*
+                 * CANVAS HISTORY SYNC
+                 *
+                 * A participant whose AirCanvas instance just mounted
+                 * (they joined mid-meeting, or a tile just appeared)
+                 * starts with an empty historyRef. Without this, they
+                 * see nothing already drawn on that tile until its
+                 * owner draws something NEW — the "host draws, but a
+                 * participant who joined late sees nothing" bug.
+                 *
+                 * Only the participant whose OWN identity equals a
+                 * tile's identity can ever have authoritative history
+                 * for that tile (that is the only client that has ever
+                 * been allowed to draw on it), so a viewer asks that
+                 * owner directly and the owner replies with a one-time
+                 * full dump, independent of who currently holds AirCanvas
+                 * write permission.
+                 */
                 if (event.type === "history-request") {
                     if (
                         message.sourceIdentity ===
                         room.localParticipant.identity
                     ) {
+                        // Our own request, echoed back to us. Ignore it.
                         return;
                     }
 
@@ -996,6 +1176,13 @@ export default function AirCanvas({
                     return;
                 }
 
+                /*
+                 * Each AirCanvas belongs to exactly one participant tile.
+                 * Route a drawing by the identity of the participant who
+                 * produced it. This prevents one person's stroke from being
+                 * rendered on every tile. targetIdentity is retained only as
+                 * a compatibility guard for older packets.
+                 */
                 const sourceIdentity =
                     event.sourceIdentity ||
                     message.sourceIdentity ||
@@ -1020,6 +1207,11 @@ export default function AirCanvas({
                     sourceIdentity,
                 };
 
+                /*
+                 * The controller already draws its own event locally.
+                 * Ignore the echoed packet from LiveKit on that same
+                 * browser so the local stroke is not duplicated.
+                 */
                 if (
                     sourceParticipant?.identity ===
                     room.localParticipant.identity
@@ -1138,6 +1330,12 @@ export default function AirCanvas({
         mirror,
     ]);
 
+    /*
+     * Attach the controller's existing LiveKit camera
+     * track to an invisible processing video.
+     *
+     * We NEVER create a second camera stream.
+     */
     useEffect(() => {
         let stopped =
             false;
@@ -1234,6 +1432,10 @@ export default function AirCanvas({
         canvasTileIdentity,
     ]);
 
+    /*
+     * Load legacy MediaPipe Hands.
+     * This keeps the tested KNN model and browser pipeline.
+     */
     useEffect(() => {
         if (!isController) {
             return undefined;
@@ -1374,6 +1576,10 @@ export default function AirCanvas({
         mirror,
     ]);
 
+    /*
+     * Run MediaPipe continuously while this participant
+     * owns AirCanvas control.
+     */
     useEffect(() => {
         if (!isController) {
             return undefined;
@@ -1471,6 +1677,9 @@ export default function AirCanvas({
         isController,
     ]);
 
+    /*
+     * Resize the transparent overlay whenever the tile changes.
+     */
     useEffect(() => {
         mountedRef.current =
             true;
@@ -1519,6 +1728,9 @@ export default function AirCanvas({
         };
     }, []);
 
+    /*
+     * Redraw when the tile/video becomes available.
+     */
     useEffect(() => {
         const timer =
             window.setTimeout(
