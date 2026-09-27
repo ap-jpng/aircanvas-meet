@@ -799,6 +799,70 @@ body[data-theme="light"] .chat-panel {
 }
 
 /* =========================================================
+   AIRCANVAS SIDE PANEL BOXES
+   Theme-aware replacement for what used to be inline styles on
+   the AirCanvas control panel content. Dark-theme colors below
+   match what was previously hardcoded inline; the light-theme
+   overrides live in the LIGHT THEME section further down.
+========================================================= */
+
+.aircanvas-panel-content {
+    padding: 18px;
+    color: #dce3ee;
+}
+
+.aircanvas-box {
+    padding: 14px;
+    border-radius: 10px;
+    margin-bottom: 15px;
+}
+
+.aircanvas-box:last-child {
+    margin-bottom: 0;
+}
+
+.aircanvas-box.spacious {
+    padding: 16px;
+}
+
+.aircanvas-box.neutral {
+    background: #151f31;
+}
+
+.aircanvas-box.active {
+    background: #162b2b;
+    margin-bottom: 12px;
+}
+
+.aircanvas-box.request {
+    background: #202a3d;
+    margin-bottom: 0;
+}
+
+.aircanvas-box p {
+    margin: 7px 0 0;
+    color: #8995a9;
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.aircanvas-box.active p {
+    color: #9db2b3;
+    margin: 7px 0 12px;
+}
+
+.aircanvas-box.request p {
+    color: #c2ccda;
+    font-size: 13px;
+    margin: 7px 0 12px;
+}
+
+.aircanvas-box-actions {
+    display: flex;
+    gap: 8px;
+}
+
+/* =========================================================
    BOTTOM CONTROLS
 ========================================================= */
 
@@ -1556,6 +1620,39 @@ body[data-theme="light"] .theme-toggle-fab {
 
 body[data-theme="light"] .theme-toggle-fab:hover {
     background: #ffffff;
+}
+
+/* AirCanvas side-panel boxes (light theme) */
+
+body[data-theme="light"] .aircanvas-panel-content {
+    color: #16202f;
+}
+
+body[data-theme="light"] .aircanvas-box.neutral {
+    background: #f4f6fb;
+    border: 1px solid #dde3ee;
+}
+
+body[data-theme="light"] .aircanvas-box.active {
+    background: #e3f7ee;
+    border: 1px solid #bfe8d6;
+}
+
+body[data-theme="light"] .aircanvas-box.request {
+    background: #eef1f7;
+    border: 1px solid #dde3ee;
+}
+
+body[data-theme="light"] .aircanvas-box p {
+    color: #5b6576;
+}
+
+body[data-theme="light"] .aircanvas-box.active p {
+    color: #2f7d63;
+}
+
+body[data-theme="light"] .aircanvas-box.request p {
+    color: #3a4657;
 }
 /* =========================================================
    AIRCANVAS

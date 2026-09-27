@@ -1538,44 +1538,17 @@ function MeetingRoom({
 
                         {activePanel ===
                             "aircanvas" && (
-                            <div
-                                style={{
-                                    padding:
-                                        "18px",
-                                    color:
-                                        "#dce3ee",
-                                }}
-                            >
+                            <div className="aircanvas-panel-content">
 
                                 {isHost ? (
                                     <>
-                                        <div
-                                            style={{
-                                                padding:
-                                                    "14px",
-                                                borderRadius:
-                                                    "10px",
-                                                background:
-                                                    "#151f31",
-                                                marginBottom:
-                                                    "15px",
-                                            }}
-                                        >
+                                        <div className="aircanvas-box neutral">
                                             <strong>
                                                 ✋ Host
                                                 Control
                                             </strong>
 
-                                            <p
-                                                style={{
-                                                    color:
-                                                        "#8995a9",
-                                                    fontSize:
-                                                        "12px",
-                                                    lineHeight:
-                                                        "1.5",
-                                                }}
-                                            >
+                                            <p>
                                                 You
                                                 always
                                                 have
@@ -1592,33 +1565,13 @@ function MeetingRoom({
                                         </div>
 
                                         {airCanvasUser ? (
-                                            <div
-                                                style={{
-                                                    padding:
-                                                        "14px",
-                                                    borderRadius:
-                                                        "10px",
-                                                    background:
-                                                        "#162b2b",
-                                                    marginBottom:
-                                                        "12px",
-                                                }}
-                                            >
+                                            <div className="aircanvas-box active">
                                                 <strong>
                                                     AirCanvas
                                                     active
                                                 </strong>
 
-                                                <p
-                                                    style={{
-                                                        margin:
-                                                            "7px 0 12px",
-                                                        color:
-                                                            "#9db2b3",
-                                                        fontSize:
-                                                            "12px",
-                                                    }}
-                                                >
+                                                <p>
                                                     {participants.find(
                                                         (
                                                             p
@@ -1647,31 +1600,13 @@ function MeetingRoom({
                                                 </button>
                                             </div>
                                         ) : (
-                                            <div
-                                                style={{
-                                                    padding:
-                                                        "14px",
-                                                    borderRadius:
-                                                        "10px",
-                                                    background:
-                                                        "#151f31",
-                                                    marginBottom:
-                                                        "12px",
-                                                }}
-                                            >
+                                            <div className="aircanvas-box neutral">
                                                 <strong>
                                                     No participant
                                                     has control
                                                 </strong>
 
-                                                <p
-                                                    style={{
-                                                        color:
-                                                            "#8995a9",
-                                                        fontSize:
-                                                            "12px",
-                                                    }}
-                                                >
+                                                <p>
                                                     AirCanvas
                                                     is available
                                                     for you.
@@ -1685,30 +1620,14 @@ function MeetingRoom({
 
                                         {pendingRequest &&
                                             !pendingRequest.waiting && (
-                                                <div
-                                                    style={{
-                                                        padding:
-                                                            "14px",
-                                                        borderRadius:
-                                                            "10px",
-                                                        background:
-                                                            "#202a3d",
-                                                    }}
-                                                >
+                                                <div className="aircanvas-box request">
 
                                                     <strong>
                                                         AirCanvas
                                                         Request
                                                     </strong>
 
-                                                    <p
-                                                        style={{
-                                                            color:
-                                                                "#c2ccda",
-                                                            fontSize:
-                                                                "13px",
-                                                        }}
-                                                    >
+                                                    <p>
                                                         {
                                                             pendingRequest.name
                                                         }{" "}
@@ -1717,14 +1636,7 @@ function MeetingRoom({
                                                         AirCanvas.
                                                     </p>
 
-                                                    <div
-                                                        style={{
-                                                            display:
-                                                                "flex",
-                                                            gap:
-                                                                "8px",
-                                                        }}
-                                                    >
+                                                    <div className="aircanvas-box-actions">
 
                                                         <button
                                                             className="primary-button"
@@ -1756,31 +1668,13 @@ function MeetingRoom({
                                     </>
                                 ) : airCanvasAllowed ? (
                                     <>
-                                        <div
-                                            style={{
-                                                padding:
-                                                    "16px",
-                                                borderRadius:
-                                                    "10px",
-                                                background:
-                                                    "#162b2b",
-                                            }}
-                                        >
+                                        <div className="aircanvas-box active spacious">
                                             <strong>
                                                 ✓ AirCanvas
                                                 Access Granted
                                             </strong>
 
-                                            <p
-                                                style={{
-                                                    color:
-                                                        "#9db2b3",
-                                                    fontSize:
-                                                        "12px",
-                                                    lineHeight:
-                                                        "1.5",
-                                                }}
-                                            >
+                                            <p>
                                                 The host has
                                                 permitted you
                                                 to use
@@ -1796,31 +1690,13 @@ function MeetingRoom({
                                     </>
                                 ) : (
                                     <>
-                                        <div
-                                            style={{
-                                                padding:
-                                                    "16px",
-                                                borderRadius:
-                                                    "10px",
-                                                background:
-                                                    "#151f31",
-                                            }}
-                                        >
+                                        <div className="aircanvas-box neutral spacious">
                                             <strong>
                                                 AirCanvas
                                                 Permission
                                             </strong>
 
-                                            <p
-                                                style={{
-                                                    color:
-                                                        "#8995a9",
-                                                    fontSize:
-                                                        "12px",
-                                                    lineHeight:
-                                                        "1.5",
-                                                }}
-                                            >
+                                            <p>
                                                 You need
                                                 permission
                                                 from the
