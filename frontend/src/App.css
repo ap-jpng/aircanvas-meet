@@ -773,10 +773,29 @@ body {
     flex: 1;
     min-height: 0;
     overflow: hidden;
+    /*
+     * FIX (#4): pin LiveKit's own chat color variables to match our
+     * theme explicitly, instead of leaving them at whatever LiveKit's
+     * defaults are, which could leave chat text a dark color that's
+     * unreadable against our dark background.
+     */
+    --lk-fg: #f5f7fb;
+    --lk-fg2: #cbd4e2;
+    --lk-bg: #0d1320;
+    --lk-bg2: #151e2e;
+    --lk-border-color: #263149;
 }
 
 .chat-panel .lk-chat {
     height: 100%;
+}
+
+body[data-theme="light"] .chat-panel {
+    --lk-fg: #16202f;
+    --lk-fg2: #3a4657;
+    --lk-bg: #ffffff;
+    --lk-bg2: #f4f6fb;
+    --lk-border-color: #dde3ee;
 }
 
 /* =========================================================
@@ -805,6 +824,7 @@ body {
 }
 
 .meeting-control-button {
+    position: relative;
     min-width: 74px;
     height: 54px;
     padding: 5px 10px;
@@ -838,6 +858,21 @@ body {
     font-size: 10px;
     white-space: nowrap;
     color: #a8b3c4;
+}
+
+.control-badge-dot {
+    position: absolute;
+    top: 4px;
+    right: 12px;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: #ff4d4d;
+    box-shadow: 0 0 0 2px #0a101c;
+}
+
+body[data-theme="light"] .control-badge-dot {
+    box-shadow: 0 0 0 2px #ffffff;
 }
 
 .aircanvas-control {
@@ -937,16 +972,33 @@ body {
     }
 
     .brand-section {
-        min-width: auto;
+        min-width: 0;
+        flex: 1 1 auto;
+        overflow: hidden;
+    }
+
+    .brand-section > div {
+        min-width: 0;
+        overflow: hidden;
     }
 
     .brand-icon {
         width: 38px;
         height: 38px;
+        flex-shrink: 0;
     }
 
     .brand-section h1 {
         font-size: 14px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .brand-section span {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
     }
 
     .header-action span {
@@ -1027,6 +1079,27 @@ body {
     .side-panel {
         top: 62px;
         bottom: 70px;
+        /*
+         * FIX (#8): pin the panel's height to the actual visual
+         * viewport so it (and its sticky close button) stay reachable
+         * even if the on-screen keyboard resizes things after sending
+         * a chat message.
+         */
+        max-height: calc(100dvh - 62px - 70px);
+    }
+
+    /*
+     * FIX (#8): iOS Safari auto-zooms the whole page on focus of any
+     * input/textarea smaller than 16px, and after sending a chat
+     * message the page can stay zoomed in with the close button
+     * pushed out of view — looking like there's no way back to the
+     * meeting. Forcing 16px (including inside LiveKit's own chat
+     * input) prevents that zoom from happening at all.
+     */
+    input,
+    textarea,
+    select {
+        font-size: 16px;
     }
 }
 
@@ -1068,14 +1141,23 @@ input:focus-visible {
 ========================================================= */
 
 .marker-fab-wrap {
-    position: fixed;
-    top: 84px;
-    right: 16px;
-    z-index: 150;
+    /*
+     * FIX (#1): this used to be position:fixed to the whole viewport
+     * (top:84/right:16), which put it directly on top of the side
+     * panel's close (✕) button any time a panel was open. It now
+     * lives inside the controller's own .participant-tile-wrapper
+     * (which is position:relative), so it only ever sits over that
+     * tile's own corner.
+     */
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 26;
     display: flex;
     flex-direction: column;
     align-items: flex-end;
     gap: 10px;
+    pointer-events: auto;
 }
 
 .marker-fab-button {
@@ -1093,6 +1175,9 @@ input:focus-visible {
 
 .marker-fab-popover {
     width: 230px;
+    max-width: calc(100vw - 40px);
+    max-height: 260px;
+    overflow-y: auto;
     padding: 14px;
     border-radius: 14px;
     background: #11182a;

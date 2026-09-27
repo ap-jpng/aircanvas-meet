@@ -209,12 +209,9 @@ function MeetingRoom({
      * controls — it doesn't change who can draw.
      */
     const isLocalController =
-        isHost ||
-        (
-            airCanvasAllowed &&
-            airCanvasUser ===
-                room.localParticipant.identity
-        );
+        airCanvasAllowed &&
+        airCanvasUser ===
+            room.localParticipant.identity;
 
     /*
      * The host always has AirCanvas permission. This no longer needs
@@ -339,6 +336,19 @@ function MeetingRoom({
                             message.name ||
                             "Participant",
                     });
+
+                    /*
+                     * FIX (#5): the host was never actually notified of
+                     * a request — it just sat in state until the host
+                     * happened to open the AirCanvas panel themselves.
+                     * Open it automatically so the request can't be
+                     * missed. (A badge dot on the AirCanvas button, set
+                     * up below, also stays visible if the host closes
+                     * the panel again before responding.)
+                     */
+                    setActivePanel(
+                        "aircanvas"
+                    );
 
                     return;
                 }
@@ -469,6 +479,46 @@ function MeetingRoom({
        removed.
     ===================================================== */
 
+    /*
+     * FIX (#3): shared by both the network listener below and
+     * sendReaction() further down. LiveKit does not echo a
+     * participant's own published data back to themselves via
+     * RoomEvent.DataReceived, so relying only on the listener meant
+     * the person who actually clicked a reaction would never see it
+     * float over their own tile — it only ever appeared for everyone
+     * else. Showing it locally the instant it's sent (same as
+     * AirCanvas already does for its own strokes) fixes that.
+     */
+    const showReactionLocally = (
+        identity,
+        emoji
+    ) => {
+        const reactionId = `${
+            identity || "unknown"
+        }-${Date.now()}-${Math.random()
+            .toString(36)
+            .slice(2, 7)}`;
+
+        setReactions((current) => [
+            ...current,
+            {
+                id: reactionId,
+                identity,
+                emoji,
+            },
+        ]);
+
+        window.setTimeout(() => {
+            setReactions((current) =>
+                current.filter(
+                    (reaction) =>
+                        reaction.id !==
+                        reactionId
+                )
+            );
+        }, 1800);
+    };
+
     useEffect(() => {
         const handleReaction = (
             payload,
@@ -494,34 +544,11 @@ function MeetingRoom({
                     return;
                 }
 
-                const reactionId = `${
+                showReactionLocally(
                     message.identity ||
-                    participant?.identity ||
-                    "unknown"
-                }-${Date.now()}-${Math.random()
-                    .toString(36)
-                    .slice(2, 7)}`;
-
-                setReactions((current) => [
-                    ...current,
-                    {
-                        id: reactionId,
-                        identity:
-                            message.identity ||
-                            participant?.identity,
-                        emoji: message.emoji,
-                    },
-                ]);
-
-                window.setTimeout(() => {
-                    setReactions((current) =>
-                        current.filter(
-                            (reaction) =>
-                                reaction.id !==
-                                reactionId
-                        )
-                    );
-                }, 1800);
+                        participant?.identity,
+                    message.emoji
+                );
             } catch (error) {
                 console.error(
                     "Reaction message error:",
@@ -544,14 +571,20 @@ function MeetingRoom({
     }, [room]);
 
     const sendReaction = (emoji) => {
+        const identity =
+            room.localParticipant.identity;
+
+        showReactionLocally(
+            identity,
+            emoji
+        );
+
         try {
             const data = new TextEncoder().encode(
                 JSON.stringify({
                     type: "reaction",
                     emoji,
-                    identity:
-                        room.localParticipant
-                            .identity,
+                    identity,
                 })
             );
 
@@ -906,152 +939,6 @@ function MeetingRoom({
 
             <ThemeToggle />
 
-            {isLocalController && (
-                <div className="marker-fab-wrap">
-                    <button
-                        type="button"
-                        className="marker-fab-button"
-                        onClick={() =>
-                            setShowMarkerPopover(
-                                (value) => !value
-                            )
-                        }
-                        title="Marker color & size"
-                        style={{
-                            background:
-                                markerColor,
-                        }}
-                    >
-                        🖊️
-                    </button>
-
-                    {showMarkerPopover && (
-                        <div className="marker-fab-popover">
-
-                            <div className="marker-color-row">
-                                {MARKER_COLOR_PRESETS.map(
-                                    (preset) => (
-                                        <button
-                                            key={
-                                                preset
-                                            }
-                                            type="button"
-                                            className="marker-color-dot"
-                                            onClick={() =>
-                                                setMarkerColor(
-                                                    preset
-                                                )
-                                            }
-                                            title={
-                                                preset
-                                            }
-                                            style={{
-                                                background:
-                                                    preset,
-                                                outline:
-                                                    markerColor ===
-                                                    preset
-                                                        ? "2px solid #25d3ee"
-                                                        : "none",
-                                            }}
-                                        />
-                                    )
-                                )}
-
-                                <input
-                                    type="color"
-                                    value={
-                                        markerColor
-                                    }
-                                    onChange={(
-                                        event
-                                    ) =>
-                                        setMarkerColor(
-                                            event
-                                                .target
-                                                .value
-                                        )
-                                    }
-                                    title="Custom color"
-                                    className="marker-color-custom"
-                                />
-                            </div>
-
-                            <label className="marker-slider-label">
-                                <span>
-                                    Marker size
-                                </span>
-
-                                <span>
-                                    {
-                                        markerWidth
-                                    }
-                                    px
-                                </span>
-                            </label>
-
-                            <input
-                                type="range"
-                                min="2"
-                                max="14"
-                                step="1"
-                                value={
-                                    markerWidth
-                                }
-                                onChange={(
-                                    event
-                                ) =>
-                                    setMarkerWidth(
-                                        Number(
-                                            event
-                                                .target
-                                                .value
-                                        )
-                                    )
-                                }
-                                className="marker-slider"
-                            />
-
-                            <label className="marker-slider-label">
-                                <span>
-                                    Eraser size
-                                </span>
-
-                                <span>
-                                    {
-                                        eraserWidth
-                                    }
-                                    px
-                                </span>
-                            </label>
-
-                            <input
-                                type="range"
-                                min="24"
-                                max="120"
-                                step="2"
-                                value={
-                                    eraserWidth
-                                }
-                                onChange={(
-                                    event
-                                ) =>
-                                    setEraserWidth(
-                                        Number(
-                                            event
-                                                .target
-                                                .value
-                                        )
-                                    )
-                                }
-                                className="marker-slider"
-                            />
-
-                        </div>
-                    )}
-                </div>
-            )}
-
             {/* HEADER */}
 
             <header className="meeting-header">
@@ -1170,6 +1057,173 @@ function MeetingRoom({
                                             className="custom-participant-tile"
                                         />
 
+                                        {/*
+                                         * FIX (#1): this used to be a single
+                                         * fixed-position button pinned to the
+                                         * top-right of the whole screen, which
+                                         * sat directly on top of the side
+                                         * panel's close (✕) button whenever a
+                                         * panel was open. It's now rendered
+                                         * inside the controller's own tile,
+                                         * so it only ever overlaps that tile.
+                                         */}
+                                        {track
+                                            .participant
+                                            .identity ===
+                                            room
+                                                .localParticipant
+                                                .identity &&
+                                            isLocalController && (
+                                                <div className="marker-fab-wrap">
+                                                    <button
+                                                        type="button"
+                                                        className="marker-fab-button"
+                                                        onClick={() =>
+                                                            setShowMarkerPopover(
+                                                                (
+                                                                    value
+                                                                ) =>
+                                                                    !value
+                                                            )
+                                                        }
+                                                        title="Marker color & size"
+                                                        style={{
+                                                            background:
+                                                                markerColor,
+                                                        }}
+                                                    >
+                                                        🖊️
+                                                    </button>
+
+                                                    {showMarkerPopover && (
+                                                        <div className="marker-fab-popover">
+
+                                                            <div className="marker-color-row">
+                                                                {MARKER_COLOR_PRESETS.map(
+                                                                    (
+                                                                        preset
+                                                                    ) => (
+                                                                        <button
+                                                                            key={
+                                                                                preset
+                                                                            }
+                                                                            type="button"
+                                                                            className="marker-color-dot"
+                                                                            onClick={() =>
+                                                                                setMarkerColor(
+                                                                                    preset
+                                                                                )
+                                                                            }
+                                                                            title={
+                                                                                preset
+                                                                            }
+                                                                            style={{
+                                                                                background:
+                                                                                    preset,
+                                                                                outline:
+                                                                                    markerColor ===
+                                                                                    preset
+                                                                                        ? "2px solid #25d3ee"
+                                                                                        : "none",
+                                                                            }}
+                                                                        />
+                                                                    )
+                                                                )}
+
+                                                                <input
+                                                                    type="color"
+                                                                    value={
+                                                                        markerColor
+                                                                    }
+                                                                    onChange={(
+                                                                        event
+                                                                    ) =>
+                                                                        setMarkerColor(
+                                                                            event
+                                                                                .target
+                                                                                .value
+                                                                        )
+                                                                    }
+                                                                    title="Custom color"
+                                                                    className="marker-color-custom"
+                                                                />
+                                                            </div>
+
+                                                            <label className="marker-slider-label">
+                                                                <span>
+                                                                    Marker size
+                                                                </span>
+
+                                                                <span>
+                                                                    {
+                                                                        markerWidth
+                                                                    }
+                                                                    px
+                                                                </span>
+                                                            </label>
+
+                                                            <input
+                                                                type="range"
+                                                                min="2"
+                                                                max="14"
+                                                                step="1"
+                                                                value={
+                                                                    markerWidth
+                                                                }
+                                                                onChange={(
+                                                                    event
+                                                                ) =>
+                                                                    setMarkerWidth(
+                                                                        Number(
+                                                                            event
+                                                                                .target
+                                                                                .value
+                                                                        )
+                                                                    )
+                                                                }
+                                                                className="marker-slider"
+                                                            />
+
+                                                            <label className="marker-slider-label">
+                                                                <span>
+                                                                    Eraser size
+                                                                </span>
+
+                                                                <span>
+                                                                    {
+                                                                        eraserWidth
+                                                                    }
+                                                                    px
+                                                                </span>
+                                                            </label>
+
+                                                            <input
+                                                                type="range"
+                                                                min="24"
+                                                                max="120"
+                                                                step="2"
+                                                                value={
+                                                                    eraserWidth
+                                                                }
+                                                                onChange={(
+                                                                    event
+                                                                ) =>
+                                                                    setEraserWidth(
+                                                                        Number(
+                                                                            event
+                                                                                .target
+                                                                                .value
+                                                                        )
+                                                                    )
+                                                                }
+                                                                className="marker-slider"
+                                                            />
+
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+
                                         {
                                             /*
                                              * Mount one AirCanvas instance for EVERY
@@ -1191,14 +1245,9 @@ function MeetingRoom({
                                                 isController={
                                                     track.participant.identity ===
                                                         room.localParticipant.identity &&
-                                                    (
-                                                        isHost ||
-                                                        (
-                                                            airCanvasAllowed &&
-                                                            airCanvasUser ===
-                                                                room.localParticipant.identity
-                                                        )
-                                                    )
+                                                    airCanvasAllowed &&
+                                                    airCanvasUser ===
+                                                        room.localParticipant.identity
                                                 }
                                                 showOverlay={
                                                     track.participant.identity ===
@@ -1909,6 +1958,13 @@ function MeetingRoom({
                             "aircanvas"
                         }
                         special
+                        badge={
+                            isHost &&
+                            Boolean(
+                                pendingRequest
+                            ) &&
+                            !pendingRequest?.waiting
+                        }
                         onClick={
                             handleAirCanvas
                         }
@@ -2015,6 +2071,7 @@ function ControlButton({
     active,
     onClick,
     special = false,
+    badge = false,
 }) {
     return (
         <button
@@ -2038,6 +2095,13 @@ function ControlButton({
             <span className="control-label">
                 {label}
             </span>
+
+            {badge && (
+                <span
+                    className="control-badge-dot"
+                    aria-hidden="true"
+                />
+            )}
         </button>
     );
 }
