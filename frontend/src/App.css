@@ -446,6 +446,7 @@ body {
 .brand-section h1 {
     margin: 0;
     font-size: 16px;
+    color: #f5f7fb;
 }
 
 .brand-section span {
@@ -677,6 +678,7 @@ body {
 .side-panel-header h2 {
     margin: 0;
     font-size: 16px;
+    color: #f5f7fb;
 }
 
 .side-panel-header span {
@@ -1486,6 +1488,10 @@ body[data-theme="light"] .brand-icon {
     border-color: #d6dce7;
 }
 
+body[data-theme="light"] .brand-section h1 {
+    color: #16202f;
+}
+
 body[data-theme="light"] .brand-section span {
     color: #6b7484;
 }
@@ -1537,6 +1543,10 @@ body[data-theme="light"] .side-panel {
 body[data-theme="light"] .side-panel-header {
     background: #ffffff;
     border-bottom-color: #dde3ee;
+}
+
+body[data-theme="light"] .side-panel-header h2 {
+    color: #16202f;
 }
 
 body[data-theme="light"] .side-panel-header span {
