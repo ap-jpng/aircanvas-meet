@@ -42,6 +42,9 @@ const REACTION_TOPIC =
 const MEETING_CONTROL_TOPIC =
     "aircanvas-meeting-control";
 
+const CAPTIONS_TOPIC =
+    "aircanvas-captions";
+
 /* =========================================================
    DATA HELPERS
 ========================================================= */
@@ -151,6 +154,20 @@ function MeetingRoom({
 
     const [reactions, setReactions] =
         useState([]);
+
+    /*
+     * CAPTIONS — new feature, additive only.
+     * captionLines holds the last few (Name: text) lines shown at the
+     * bottom of the video area. captionsOn controls whether THIS
+     * browser is running its own local speech recognition (each
+     * participant's captions come from their OWN microphone only —
+     * nothing here touches anyone else's audio).
+     */
+    const [captionLines, setCaptionLines] =
+        useState([]);
+
+    const [captionsOn, setCaptionsOn] =
+        useState(false);
 
     /*
      * END MEETING (host-only "End meeting for everyone").
@@ -720,6 +737,245 @@ function MeetingRoom({
 
         setShowReactionPicker(false);
     };
+
+    /* =====================================================
+       CAPTIONS
+       Own topic, own listener — never touches the AirCanvas or
+       reactions handlers above. Each participant who turns
+       captions on runs speech recognition on their OWN microphone
+       only, and broadcasts the finished line to everyone.
+    ===================================================== */
+
+    useEffect(() => {
+        const handleCaption = (
+            payload,
+            participant,
+            _kind,
+            topic
+        ) => {
+            if (topic !== CAPTIONS_TOPIC) {
+                return;
+            }
+
+            try {
+                const message = JSON.parse(
+                    new TextDecoder().decode(
+                        payload
+                    )
+                );
+
+                if (
+                    message.type !==
+                    "caption"
+                ) {
+                    return;
+                }
+
+                const lineId = `${
+                    message.identity ||
+                    "unknown"
+                }-${Date.now()}-${Math.random()
+                    .toString(36)
+                    .slice(2, 7)}`;
+
+                setCaptionLines(
+                    (current) =>
+                        [
+                            ...current,
+                            {
+                                id: lineId,
+                                identity:
+                                    message.identity,
+                                name:
+                                    message.name ||
+                                    "Participant",
+                                text:
+                                    message.text,
+                            },
+                        ].slice(-2)
+                );
+
+                window.setTimeout(() => {
+                    setCaptionLines(
+                        (current) =>
+                            current.filter(
+                                (line) =>
+                                    line.id !==
+                                    lineId
+                            )
+                    );
+                }, 6000);
+            } catch (error) {
+                console.error(
+                    "Caption message error:",
+                    error
+                );
+            }
+        };
+
+        room.on(
+            RoomEvent.DataReceived,
+            handleCaption
+        );
+
+        return () => {
+            room.off(
+                RoomEvent.DataReceived,
+                handleCaption
+            );
+        };
+    }, [room]);
+
+    /*
+     * Local speech recognition (English only), runs only while
+     * captionsOn is true and only on this device's own microphone.
+     * Browser support: Chrome/Edge (webkitSpeechRecognition). If the
+     * browser doesn't support it, this quietly does nothing.
+     */
+    useEffect(() => {
+        if (!captionsOn) {
+            return;
+        }
+
+        const SpeechRecognitionApi =
+            window.SpeechRecognition ||
+            window.webkitSpeechRecognition;
+
+        if (!SpeechRecognitionApi) {
+            console.warn(
+                "Captions: SpeechRecognition not supported in this browser."
+            );
+            return;
+        }
+
+        const recognizer =
+            new SpeechRecognitionApi();
+
+        recognizer.continuous = true;
+        recognizer.interimResults = false;
+        recognizer.lang = "en-US";
+
+        let stoppedByUser = false;
+
+        recognizer.onresult = (
+            event
+        ) => {
+            const lastResult =
+                event.results[
+                    event.results.length - 1
+                ];
+
+            if (
+                !lastResult ||
+                !lastResult.isFinal
+            ) {
+                return;
+            }
+
+            const text =
+                lastResult[0]?.transcript?.trim();
+
+            if (!text) {
+                return;
+            }
+
+            const identity =
+                room.localParticipant
+                    .identity;
+
+            sendDataMessage(
+                room,
+                {
+                    type: "caption",
+                    identity,
+                    name: localName,
+                    text,
+                },
+                CAPTIONS_TOPIC
+            );
+
+            /*
+             * LiveKit doesn't echo your own published data back to
+             * you, so show your own line locally too — same pattern
+             * already used for reactions above.
+             */
+            const lineId = `${identity}-${Date.now()}-${Math.random()
+                .toString(36)
+                .slice(2, 7)}`;
+
+            setCaptionLines(
+                (current) =>
+                    [
+                        ...current,
+                        {
+                            id: lineId,
+                            identity,
+                            name: localName,
+                            text,
+                        },
+                    ].slice(-2)
+            );
+
+            window.setTimeout(() => {
+                setCaptionLines(
+                    (current) =>
+                        current.filter(
+                            (line) =>
+                                line.id !==
+                                lineId
+                        )
+                );
+            }, 6000);
+        };
+
+        recognizer.onerror = (
+            event
+        ) => {
+            console.warn(
+                "Captions recognition error:",
+                event.error
+            );
+        };
+
+        recognizer.onend = () => {
+            if (!stoppedByUser) {
+                try {
+                    recognizer.start();
+                } catch (error) {
+                    console.warn(
+                        "Captions restart failed:",
+                        error
+                    );
+                }
+            }
+        };
+
+        try {
+            recognizer.start();
+        } catch (error) {
+            console.warn(
+                "Captions start failed:",
+                error
+            );
+        }
+
+        return () => {
+            stoppedByUser = true;
+
+            try {
+                recognizer.stop();
+            } catch (error) {
+                console.warn(
+                    "Captions stop failed:",
+                    error
+                );
+            }
+        };
+    }, [
+        captionsOn,
+        room,
+        localName,
+    ]);
 
     /* =====================================================
        MICROPHONE
@@ -1667,7 +1923,12 @@ function MeetingRoom({
 
             <div className="meeting-body">
 
-                <main className="video-area">
+                <main
+                    className="video-area"
+                    style={{
+                        position: "relative",
+                    }}
+                >
 
                     {/*
                      * FIX (screen share): render any active screen
@@ -2034,6 +2295,77 @@ function MeetingRoom({
                         )}
 
                     </div>
+
+                    {captionsOn &&
+                        captionLines.length >
+                            0 && (
+                            <div
+                                style={{
+                                    position: "absolute",
+                                    left: "50%",
+                                    bottom: "18px",
+                                    transform: "translateX(-50%)",
+                                    background: "rgba(0,0,0,0.78)",
+                                    color: "#fff",
+                                    borderRadius: "10px",
+                                    padding: "8px 16px 10px",
+                                    maxWidth: "70%",
+                                    zIndex: 30,
+                                }}
+                            >
+
+                                <div
+                                    style={{
+                                        display: "flex",
+                                        justifyContent: "flex-end",
+                                        gap: "10px",
+                                        fontSize: "12px",
+                                        opacity: 0.6,
+                                        marginBottom: "4px",
+                                    }}
+                                >
+                                    <span>
+                                        🔊
+                                    </span>
+
+                                    <span>
+                                        CC
+                                    </span>
+
+                                    <span>
+                                        ⋯
+                                    </span>
+                                </div>
+
+                                {captionLines.map(
+                                    (
+                                        line
+                                    ) => (
+                                        <div
+                                            key={
+                                                line.id
+                                            }
+                                            style={{
+                                                fontSize: "15px",
+                                                lineHeight: "1.4",
+                                                textAlign: "center",
+                                            }}
+                                        >
+                                            <strong>
+                                                {
+                                                    line.name
+                                                }
+                                                :
+                                            </strong>{" "}
+                                            {
+                                                line.text
+                                            }
+                                        </div>
+                                    )
+                                )}
+
+                            </div>
+                        )}
 
                 </main>
 
@@ -2441,6 +2773,25 @@ function MeetingRoom({
                         onClick={() =>
                             togglePanel(
                                 "chat"
+                            )
+                        }
+                    />
+
+                    <ControlButton
+                        icon="CC"
+                        label={
+                            captionsOn
+                                ? "Captions On"
+                                : "Captions"
+                        }
+                        active={
+                            captionsOn
+                        }
+                        onClick={() =>
+                            setCaptionsOn(
+                                (
+                                    value
+                                ) => !value
                             )
                         }
                     />
