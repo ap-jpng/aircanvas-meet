@@ -305,6 +305,18 @@ function MeetingRoom({
         new Map()
     );
 
+    /*
+     * SUMMARIZER (transcript PDF).
+     * A running list of EVERY caption line spoken during the meeting
+     * (not just the last couple shown on screen). A ref, not state,
+     * since it only needs to be read at the moment someone clicks
+     * "Summarizer" — it doesn't need to trigger re-renders as lines
+     * come in.
+     */
+    const transcriptLogRef = useRef(
+        []
+    );
+
     const parseParticipantMetadata =
         (participant) => {
             try {
@@ -795,6 +807,16 @@ function MeetingRoom({
                         ].slice(-2)
                 );
 
+                transcriptLogRef.current.push(
+                    {
+                        name:
+                            message.name ||
+                            "Participant",
+                        text: message.text,
+                        time: new Date(),
+                    }
+                );
+
                 window.setTimeout(() => {
                     setCaptionLines(
                         (current) =>
@@ -914,6 +936,14 @@ function MeetingRoom({
                             text,
                         },
                     ].slice(-2)
+            );
+
+            transcriptLogRef.current.push(
+                {
+                    name: localName,
+                    text,
+                    time: new Date(),
+                }
             );
 
             window.setTimeout(() => {
@@ -1708,6 +1738,90 @@ function MeetingRoom({
 
             doc.save(
                 `attendance-${roomId}.pdf`
+            );
+        };
+
+    /* =====================================================
+       SUMMARIZER (transcript PDF, host and participants)
+       Lists every caption line captured during the meeting, in the
+       order it was spoken. No summarization/rewriting — this is the
+       raw transcript, exactly as captions showed it.
+    ===================================================== */
+
+    const generateTranscript =
+        () => {
+            const lines =
+                transcriptLogRef.current;
+
+            const doc = new jsPDF();
+
+            doc.setFontSize(15);
+            doc.text(
+                "Meeting Transcript",
+                14,
+                17
+            );
+
+            doc.setFontSize(10);
+            doc.setTextColor(110);
+            doc.text(
+                `Meeting ID: ${roomId}    Generated: ${new Date().toLocaleString()}`,
+                14,
+                24
+            );
+
+            if (lines.length === 0) {
+                doc.setFontSize(11);
+                doc.setTextColor(0);
+                doc.text(
+                    "No captions were captured this meeting.",
+                    14,
+                    36
+                );
+
+                doc.save(
+                    `transcript-${roomId}.pdf`
+                );
+
+                return;
+            }
+
+            autoTable(doc, {
+                startY: 30,
+                head: [
+                    [
+                        "Time",
+                        "Speaker",
+                        "Said",
+                    ],
+                ],
+                body: lines.map(
+                    (line) => [
+                        line.time.toLocaleTimeString(),
+                        line.name,
+                        line.text,
+                    ]
+                ),
+                headStyles: {
+                    fillColor: [
+                        37, 211, 238,
+                    ],
+                    textColor: [
+                        6, 16, 24,
+                    ],
+                },
+                styles: {
+                    fontSize: 9,
+                },
+                columnStyles: {
+                    2: {
+                        cellWidth: 120,
+                    },
+                },
+            });
+
+            doc.save(
+                `transcript-${roomId}.pdf`
             );
         };
 
@@ -2895,6 +3009,23 @@ function MeetingRoom({
                 </div>
 
                 <div className="controls-right">
+
+                    <button
+                        type="button"
+                        className="attendance-button"
+                        onClick={
+                            generateTranscript
+                        }
+                        title="Download meeting transcript (PDF)"
+                    >
+                        <span>
+                            📝
+                        </span>
+
+                        <span>
+                            Summarizer
+                        </span>
+                    </button>
 
                     {isHost && (
                         <button
