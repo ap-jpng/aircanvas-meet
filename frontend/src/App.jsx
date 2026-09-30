@@ -197,6 +197,51 @@ function MeetingRoom({
         setMeetingEndedNotice,
     ] = useState(false);
 
+    /*
+     * PIN / FULLSCREEN — new feature, additive only.
+     * pinnedIdentity: which camera tile (if any) is currently pinned
+     * by THIS browser only (purely a local view preference, never
+     * broadcast to anyone else). tileWrapperRefs holds a live DOM
+     * node per tile identity so toggleTileFullscreen() can call the
+     * browser's real Fullscreen API on that exact tile.
+     */
+    const [pinnedIdentity, setPinnedIdentity] =
+        useState(null);
+
+    const tileWrapperRefs = useRef({});
+
+    const togglePinTile = (identity) => {
+        setPinnedIdentity((current) =>
+            current === identity ? null : identity
+        );
+    };
+
+    const toggleTileFullscreen = (identity) => {
+        const element = tileWrapperRefs.current[identity];
+
+        if (!element) {
+            return;
+        }
+
+        try {
+            if (document.fullscreenElement === element) {
+                document.exitFullscreen?.();
+            } else if (document.fullscreenElement) {
+                document
+                    .exitFullscreen?.()
+                    .then(() => element.requestFullscreen?.())
+                    .catch(() => {});
+            } else {
+                element.requestFullscreen?.();
+            }
+        } catch (error) {
+            console.error(
+                "Fullscreen error:",
+                error
+            );
+        }
+    };
+
     const MARKER_COLOR_PRESETS = [
         "#00ff66",
         "#25d3ee",
@@ -2458,12 +2503,25 @@ function MeetingRoom({
                             cameraTracks.map(
                                 (track) => (
                                     <div
-                                        className="participant-tile-wrapper"
+                                        className={`participant-tile-wrapper ${
+                                            pinnedIdentity ===
+                                            track.participant
+                                                .identity
+                                                ? "is-pinned"
+                                                : ""
+                                        }`}
                                         key={
                                             track
                                                 .participant
                                                 .identity
                                         }
+                                        ref={(
+                                            element
+                                        ) => {
+                                            tileWrapperRefs.current[
+                                                track.participant.identity
+                                            ] = element;
+                                        }}
                                         style={{
                                             position: "relative",
                                             overflow: "hidden",
@@ -2476,6 +2534,58 @@ function MeetingRoom({
                                             }
                                             className="custom-participant-tile"
                                         />
+
+                                        {/*
+                                         * PIN / FULLSCREEN — new, additive only.
+                                         * Sits at the top-left of every tile so it
+                                         * never collides with the marker button
+                                         * (top-right) or the participant name/mic
+                                         * overlay (bottom). Pin is a purely local
+                                         * view preference (never sent over the
+                                         * network); fullscreen calls the browser's
+                                         * real Fullscreen API on this exact tile.
+                                         */}
+                                        <div className="tile-action-buttons">
+                                            <button
+                                                type="button"
+                                                className={`tile-action-button ${
+                                                    pinnedIdentity ===
+                                                    track.participant
+                                                        .identity
+                                                        ? "active"
+                                                        : ""
+                                                }`}
+                                                onClick={() =>
+                                                    togglePinTile(
+                                                        track.participant
+                                                            .identity
+                                                    )
+                                                }
+                                                title={
+                                                    pinnedIdentity ===
+                                                    track.participant
+                                                        .identity
+                                                        ? "Unpin"
+                                                        : "Pin this tile"
+                                                }
+                                            >
+                                                📌
+                                            </button>
+
+                                            <button
+                                                type="button"
+                                                className="tile-action-button"
+                                                onClick={() =>
+                                                    toggleTileFullscreen(
+                                                        track.participant
+                                                            .identity
+                                                    )
+                                                }
+                                                title="Fullscreen"
+                                            >
+                                                ⛶
+                                            </button>
+                                        </div>
 
                                         {/*
                                          * FIX (#1): this used to be a single

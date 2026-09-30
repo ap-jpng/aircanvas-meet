@@ -2123,6 +2123,67 @@ body[data-theme="light"] .aircanvas-box.request p {
 }
 
 /* =========================================================
+   PIN / FULLSCREEN TILE ACTIONS
+   Additive only — new selectors, nothing existing modified.
+========================================================= */
+
+.tile-action-buttons {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    z-index: 26;
+    display: flex;
+    gap: 8px;
+}
+
+.tile-action-button {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    background: rgba(10, 16, 28, 0.68);
+    color: #fff;
+    font-size: 14px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(3px);
+}
+
+.tile-action-button:hover {
+    background: rgba(20, 27, 41, 0.9);
+}
+
+.tile-action-button.active {
+    background: #25c9e8;
+    color: #061018;
+    border-color: #25c9e8;
+}
+
+/*
+ * Pinning a tile makes it span 2 columns/rows of the existing
+ * CSS grid, so it reads as the "main" tile among the others,
+ * without restructuring the grid itself or touching any other
+ * tile's markup/behavior.
+ */
+.participant-tile-wrapper.is-pinned {
+    grid-column: span 2;
+    grid-row: span 2;
+    z-index: 2;
+}
+
+body[data-theme="light"] .tile-action-button {
+    background: rgba(255, 255, 255, 0.85);
+    color: #16202f;
+    border-color: rgba(20, 30, 50, 0.15);
+}
+
+body[data-theme="light"] .tile-action-button:hover {
+    background: #ffffff;
+}
+
+/* =========================================================
    SCREEN SHARE
    Additive only — does not modify camera tile styles/layout.
 ========================================================= */
