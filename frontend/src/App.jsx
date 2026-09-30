@@ -1339,6 +1339,150 @@ function MeetingRoom({
         };
 
     /* =====================================================
+       HOST: MUTE / REMOVE A PARTICIPANT (new feature)
+       Both call the backend (privileged LiveKit server calls —
+       a normal participant token can't do this from the browser),
+       the exact same way "End Meeting" already does above: sending
+       roomId + the host's own sessionStorage hostToken so the
+       backend can verify the caller really is the host.
+    ===================================================== */
+
+    const [
+        participantActionError,
+        setParticipantActionError,
+    ] = useState("");
+
+    useEffect(() => {
+        if (!participantActionError) {
+            return;
+        }
+
+        const timer =
+            window.setTimeout(() => {
+                setParticipantActionError(
+                    ""
+                );
+            }, 4000);
+
+        return () =>
+            window.clearTimeout(timer);
+    }, [
+        participantActionError,
+    ]);
+
+    const hostMuteParticipant =
+        async (
+            participantIdentity,
+            trackType,
+            muted
+        ) => {
+            if (!isHost) {
+                return;
+            }
+
+            try {
+                const hostToken =
+                    sessionStorage.getItem(
+                        `aircanvas-host-${roomId}`
+                    );
+
+                const response =
+                    await fetch(
+                        `${BACKEND_URL}/api/meeting/mute-participant`,
+                        {
+                            method: "POST",
+                            headers: {
+                                "Content-Type":
+                                    "application/json",
+                            },
+                            body: JSON.stringify(
+                                {
+                                    roomId,
+                                    hostToken,
+                                    participantIdentity,
+                                    trackType,
+                                    muted,
+                                }
+                            ),
+                        }
+                    );
+
+                const data =
+                    await response.json();
+
+                if (!data.success) {
+                    setParticipantActionError(
+                        data.message ||
+                            "Couldn't mute that participant."
+                    );
+                }
+            } catch (error) {
+                console.error(
+                    "Mute participant error:",
+                    error
+                );
+
+                setParticipantActionError(
+                    "Couldn't reach the server to mute that participant."
+                );
+            }
+        };
+
+    const hostRemoveParticipant =
+        async (
+            participantIdentity
+        ) => {
+            if (!isHost) {
+                return;
+            }
+
+            try {
+                const hostToken =
+                    sessionStorage.getItem(
+                        `aircanvas-host-${roomId}`
+                    );
+
+                const response =
+                    await fetch(
+                        `${BACKEND_URL}/api/meeting/remove-participant`,
+                        {
+                            method: "POST",
+                            headers: {
+                                "Content-Type":
+                                    "application/json",
+                            },
+                            body: JSON.stringify(
+                                {
+                                    roomId,
+                                    hostToken,
+                                    participantIdentity,
+                                }
+                            ),
+                        }
+                    );
+
+                const data =
+                    await response.json();
+
+                if (!data.success) {
+                    setParticipantActionError(
+                        data.message ||
+                            "Couldn't remove that participant."
+                    );
+                }
+            } catch (error) {
+                console.error(
+                    "Remove participant error:",
+                    error
+                );
+
+                setParticipantActionError(
+                    "Couldn't reach the server to remove that participant."
+                );
+            }
+        };
+
+    /* =====================================================
        LISTEN FOR "MEETING ENDED" (all participants)
     ===================================================== */
 
@@ -2724,6 +2868,24 @@ function MeetingRoom({
                             "participants" && (
                             <div className="participants-list">
 
+                                {participantActionError && (
+                                    <div
+                                        style={{
+                                            background: "rgba(255,77,109,0.12)",
+                                            border: "1px solid #ff4d6d",
+                                            color: "#ff4d6d",
+                                            borderRadius: "8px",
+                                            padding: "8px 10px",
+                                            fontSize: "13px",
+                                            marginBottom: "10px",
+                                        }}
+                                    >
+                                        {
+                                            participantActionError
+                                        }
+                                    </div>
+                                )}
+
                                 {participants.map(
                                     (
                                         participant
@@ -2767,7 +2929,7 @@ function MeetingRoom({
 
                                             </div>
 
-                                            <div className="participant-status">
+                            <div className="participant-status">
 
                                                 {participant.isMicrophoneEnabled
                                                     ? "🎤"
@@ -2778,6 +2940,120 @@ function MeetingRoom({
                                                     : "📹̸"}
 
                                             </div>
+
+                                            {isHost &&
+                                                participant.identity !==
+                                                    room
+                                                        .localParticipant
+                                                        .identity && (
+                                                    <div
+                                                        style={{
+                                                            display: "flex",
+                                                            gap: "6px",
+                                                            marginLeft: "8px",
+                                                        }}
+                                                    >
+                                                        <button
+                                                            type="button"
+                                                            title={
+                                                                participant.isMicrophoneEnabled
+                                                                    ? "Mute their mic"
+                                                                    : "Their mic is already off"
+                                                            }
+                                                            disabled={
+                                                                !participant.isMicrophoneEnabled
+                                                            }
+                                                            onClick={() =>
+                                                                hostMuteParticipant(
+                                                                    participant.identity,
+                                                                    "microphone",
+                                                                    true
+                                                                )
+                                                            }
+                                                            style={{
+                                                                background: "transparent",
+                                                                border: "1px solid #29344a",
+                                                                borderRadius: "6px",
+                                                                color: "#dce3ee",
+                                                                fontSize: "13px",
+                                                                padding: "3px 6px",
+                                                                cursor: participant.isMicrophoneEnabled
+                                                                    ? "pointer"
+                                                                    : "default",
+                                                                opacity: participant.isMicrophoneEnabled
+                                                                    ? 1
+                                                                    : 0.4,
+                                                            }}
+                                                        >
+                                                            🔇
+                                                        </button>
+
+                                                        <button
+                                                            type="button"
+                                                            title={
+                                                                participant.isCameraEnabled
+                                                                    ? "Turn off their camera"
+                                                                    : "Their camera is already off"
+                                                            }
+                                                            disabled={
+                                                                !participant.isCameraEnabled
+                                                            }
+                                                            onClick={() =>
+                                                                hostMuteParticipant(
+                                                                    participant.identity,
+                                                                    "camera",
+                                                                    true
+                                                                )
+                                                            }
+                                                            style={{
+                                                                background: "transparent",
+                                                                border: "1px solid #29344a",
+                                                                borderRadius: "6px",
+                                                                color: "#dce3ee",
+                                                                fontSize: "13px",
+                                                                padding: "3px 6px",
+                                                                cursor: participant.isCameraEnabled
+                                                                    ? "pointer"
+                                                                    : "default",
+                                                                opacity: participant.isCameraEnabled
+                                                                    ? 1
+                                                                    : 0.4,
+                                                            }}
+                                                        >
+                                                            📹̸
+                                                        </button>
+
+                                                        <button
+                                                            type="button"
+                                                            title="Remove from meeting"
+                                                            onClick={() => {
+                                                                if (
+                                                                    window.confirm(
+                                                                        `Remove ${
+                                                                            participant.name ||
+                                                                            participant.identity
+                                                                        } from the meeting?`
+                                                                    )
+                                                                ) {
+                                                                    hostRemoveParticipant(
+                                                                        participant.identity
+                                                                    );
+                                                                }
+                                                            }}
+                                                            style={{
+                                                                background: "transparent",
+                                                                border: "1px solid #ff4d6d",
+                                                                borderRadius: "6px",
+                                                                color: "#ff4d6d",
+                                                                fontSize: "13px",
+                                                                padding: "3px 6px",
+                                                                cursor: "pointer",
+                                                            }}
+                                                        >
+                                                            ⛔
+                                                        </button>
+                                                    </div>
+                                                )}
 
                                         </div>
                                     )
