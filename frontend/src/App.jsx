@@ -170,6 +170,16 @@ function MeetingRoom({
         useState(false);
 
     /*
+     * HOST JOIN NOTIFICATIONS — new feature, additive only.
+     * Small toast stack, host-only, telling the host when someone
+     * new connects. Fully separate from the existing attendance
+     * ParticipantConnected listener below — this never touches that
+     * logic, it's just a second, independent listener.
+     */
+    const [joinNotices, setJoinNotices] =
+        useState([]);
+
+    /*
      * END MEETING (host-only "End meeting for everyone").
      * showEndMeetingConfirm gates the confirmation dialog the host
      * sees before the broadcast goes out. meetingEndedNotice is shown
@@ -1496,6 +1506,119 @@ function MeetingRoom({
         participantName,
     ]);
 
+    /* =====================================================
+       HOST JOIN NOTIFICATIONS
+       Separate listener from attendance tracking above — only
+       attached at all when isHost is true, so participants never
+       see or pay for this.
+    ===================================================== */
+
+    useEffect(() => {
+        if (!isHost) {
+            return;
+        }
+
+        const playJoinChime = () => {
+            try {
+                const AudioContextApi =
+                    window.AudioContext ||
+                    window.webkitAudioContext;
+
+                if (!AudioContextApi) {
+                    return;
+                }
+
+                const ctx =
+                    new AudioContextApi();
+
+                const oscillator =
+                    ctx.createOscillator();
+
+                const gain =
+                    ctx.createGain();
+
+                oscillator.type = "sine";
+                oscillator.frequency.value = 880;
+
+                gain.gain.setValueAtTime(
+                    0.08,
+                    ctx.currentTime
+                );
+
+                gain.gain.exponentialRampToValueAtTime(
+                    0.0001,
+                    ctx.currentTime + 0.3
+                );
+
+                oscillator.connect(gain);
+                gain.connect(
+                    ctx.destination
+                );
+
+                oscillator.start();
+                oscillator.stop(
+                    ctx.currentTime + 0.3
+                );
+            } catch (error) {
+                // Audio can be blocked by the browser; the visual
+                // toast below still shows either way.
+            }
+        };
+
+        const handleParticipantJoined = (
+            participant
+        ) => {
+            const metadata =
+                parseParticipantMetadata(
+                    participant
+                );
+
+            const name =
+                getSafeName(
+                    metadata.name,
+                    participant.name,
+                    participant.identity
+                );
+
+            const noticeId = `${participant.identity}-${Date.now()}`;
+
+            setJoinNotices(
+                (current) => [
+                    ...current,
+                    {
+                        id: noticeId,
+                        name,
+                    },
+                ]
+            );
+
+            playJoinChime();
+
+            window.setTimeout(() => {
+                setJoinNotices(
+                    (current) =>
+                        current.filter(
+                            (notice) =>
+                                notice.id !==
+                                noticeId
+                        )
+                );
+            }, 4000);
+        };
+
+        room.on(
+            RoomEvent.ParticipantConnected,
+            handleParticipantJoined
+        );
+
+        return () => {
+            room.off(
+                RoomEvent.ParticipantConnected,
+                handleParticipantJoined
+            );
+        };
+    }, [room, isHost]);
+
     /*
      * A participant's real name (and, sometimes, their metadata)
      * can arrive slightly AFTER they're first seen — recordJoin()
@@ -1911,6 +2034,53 @@ function MeetingRoom({
         <div className="meeting-room">
 
             <ThemeToggle />
+
+            {/* HOST JOIN NOTIFICATIONS */}
+
+            {isHost &&
+                joinNotices.length >
+                    0 && (
+                    <div
+                        style={{
+                            position: "fixed",
+                            top: "90px",
+                            right: "18px",
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: "8px",
+                            zIndex: 60,
+                        }}
+                    >
+                        {joinNotices.map(
+                            (
+                                notice
+                            ) => (
+                                <div
+                                    key={
+                                        notice.id
+                                    }
+                                    style={{
+                                        background: "rgba(16,23,38,0.92)",
+                                        color: "#fff",
+                                        border: "1px solid #263149",
+                                        borderRadius: "10px",
+                                        padding: "10px 14px",
+                                        fontSize: "14px",
+                                        boxShadow: "0 4px 14px rgba(0,0,0,0.3)",
+                                    }}
+                                >
+                                    🔔{" "}
+                                    <strong>
+                                        {
+                                            notice.name
+                                        }
+                                    </strong>{" "}
+                                    joined the meeting
+                                </div>
+                            )
+                        )}
+                    </div>
+                )}
 
             {/* END MEETING CONFIRMATION (host) */}
 
