@@ -3429,33 +3429,56 @@ function MeetingRoom({
 
                         {showReactionPicker && (
                             <div className="reaction-picker">
-                                {[
-                                    "👍",
-                                    "😂",
-                                    "❤️",
-                                    "✋",
-                                ].map(
-                                    (
-                                        emoji
-                                    ) => (
-                                        <button
-                                            key={
-                                                emoji
-                                            }
-                                            type="button"
-                                            className="reaction-picker-button"
-                                            onClick={() =>
-                                                sendReaction(
+
+                                <div className="reaction-picker-emojis">
+                                    {[
+                                        "👍",
+                                        "👏",
+                                        "😂",
+                                        "😮",
+                                        "❤️",
+                                        "🎉",
+                                    ].map(
+                                        (
+                                            emoji
+                                        ) => (
+                                            <button
+                                                key={
                                                     emoji
-                                                )
-                                            }
-                                        >
-                                            {
-                                                emoji
-                                            }
-                                        </button>
-                                    )
-                                )}
+                                                }
+                                                type="button"
+                                                className="reaction-picker-button"
+                                                onClick={() =>
+                                                    sendReaction(
+                                                        emoji
+                                                    )
+                                                }
+                                            >
+                                                {
+                                                    emoji
+                                                }
+                                            </button>
+                                        )
+                                    )}
+                                </div>
+
+                                <div className="reaction-picker-divider" />
+
+                                <button
+                                    type="button"
+                                    className="reaction-picker-raisehand"
+                                    onClick={() =>
+                                        sendReaction(
+                                            "✋"
+                                        )
+                                    }
+                                >
+                                    <span className="reaction-picker-raisehand-icon">
+                                        ✋
+                                    </span>
+                                    Raise Hand
+                                </button>
+
                             </div>
                         )}
                     </div>

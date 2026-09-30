@@ -1486,9 +1486,10 @@ input:focus-visible {
     left: 50%;
     transform: translateX(-50%);
     display: flex;
-    gap: 6px;
-    padding: 8px;
-    border-radius: 14px;
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px;
+    border-radius: 18px;
     background: #11182a;
     border: 1px solid #263149;
     box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
@@ -1499,6 +1500,18 @@ input:focus-visible {
      * that panel on mobile.
      */
     z-index: 55;
+    width: min(320px, calc(100vw - 32px));
+}
+
+/*
+ * Row of quick-tap emoji buttons across the top of the picker,
+ * matching the requested layout: six reactions in a single row.
+ */
+.reaction-picker-emojis {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 4px;
 }
 
 .reaction-picker-button {
@@ -1512,10 +1525,51 @@ input:focus-visible {
     display: flex;
     align-items: center;
     justify-content: center;
+    flex-shrink: 0;
 }
 
 .reaction-picker-button:hover {
     background: #202b40;
+}
+
+/*
+ * Thin divider between the emoji row and the Raise Hand action,
+ * same pattern as the reference layout.
+ */
+.reaction-picker-divider {
+    height: 1px;
+    background: #263149;
+}
+
+/*
+ * Full-width "Raise Hand" action below the divider. Sends the ✋
+ * reaction the same way the quick emoji buttons above do -- it's
+ * just given its own labeled row since it's the most commonly used
+ * reaction in a classroom/meeting context.
+ */
+.reaction-picker-raisehand {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: 100%;
+    height: 44px;
+    border: none;
+    border-radius: 12px;
+    background: #182235;
+    color: #e9eef7;
+    font-size: 14px;
+    font-weight: 650;
+    cursor: pointer;
+}
+
+.reaction-picker-raisehand:hover {
+    background: #202d44;
+}
+
+.reaction-picker-raisehand-icon {
+    font-size: 18px;
+    line-height: 1;
 }
 
 .floating-reaction {
@@ -1809,6 +1863,19 @@ body[data-theme="light"] .reaction-picker {
     color: #16202f;
 }
 
+body[data-theme="light"] .reaction-picker-divider {
+    background: #dde3ee;
+}
+
+body[data-theme="light"] .reaction-picker-raisehand {
+    background: #eef1f7;
+    color: #16202f;
+}
+
+body[data-theme="light"] .reaction-picker-raisehand:hover {
+    background: #e3e8f1;
+}
+
 body[data-theme="light"] .marker-slider-label {
     color: #2a3546;
 }
@@ -2093,6 +2160,7 @@ body[data-theme="light"] .screen-share-tile-wrapper {
     background: #dfe4ee;
     border-color: #d6dce7;
 }
+
 
 @media (max-width: 700px) {
     .screen-share-tile-wrapper {
