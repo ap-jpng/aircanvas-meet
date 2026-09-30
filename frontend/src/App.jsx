@@ -1370,6 +1370,36 @@ function MeetingRoom({
         participantActionError,
     ]);
 
+    /*
+     * FIX (diagnostics): both handlers below used to do
+     * `await response.json()` directly and rely on one generic
+     * catch-all message for ANY failure -- a real network failure, a
+     * 404 (route not deployed), a 500 with an HTML error page, and a
+     * clean JSON error from the backend all looked identical to the
+     * host ("Couldn't reach the server..."). Reading the raw response
+     * text first and only THEN trying to parse it as JSON means a
+     * non-JSON response (most commonly: this exact backend route
+     * hasn't been deployed yet, so Express's default 404 page comes
+     * back as HTML) now surfaces as its own specific, actionable
+     * message instead of being indistinguishable from a dropped
+     * network connection.
+     */
+    const parseActionResponse = async (
+        response
+    ) => {
+        const rawText =
+            await response.text();
+
+        try {
+            return JSON.parse(rawText);
+        } catch {
+            throw new Error(
+                `Server returned an unexpected (non-JSON) response, HTTP ${response.status}. ` +
+                    `This usually means the backend hasn't been redeployed with this endpoint yet.`
+            );
+        }
+    };
+
     const hostMuteParticipant =
         async (
             participantIdentity,
@@ -1408,7 +1438,9 @@ function MeetingRoom({
                     );
 
                 const data =
-                    await response.json();
+                    await parseActionResponse(
+                        response
+                    );
 
                 if (!data.success) {
                     setParticipantActionError(
@@ -1423,7 +1455,8 @@ function MeetingRoom({
                 );
 
                 setParticipantActionError(
-                    "Couldn't reach the server to mute that participant."
+                    error.message ||
+                        "Couldn't reach the server to mute that participant."
                 );
             }
         };
@@ -1462,7 +1495,9 @@ function MeetingRoom({
                     );
 
                 const data =
-                    await response.json();
+                    await parseActionResponse(
+                        response
+                    );
 
                 if (!data.success) {
                     setParticipantActionError(
@@ -1477,7 +1512,8 @@ function MeetingRoom({
                 );
 
                 setParticipantActionError(
-                    "Couldn't reach the server to remove that participant."
+                    error.message ||
+                        "Couldn't reach the server to remove that participant."
                 );
             }
         };

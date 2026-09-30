@@ -3,7 +3,11 @@ const http = require("http");
 const cors = require("cors");
 const dotenv = require("dotenv");
 const crypto = require("crypto");
-const { AccessToken } = require("livekit-server-sdk");
+const {
+    AccessToken,
+    RoomServiceClient,
+    TrackSource,
+} = require("livekit-server-sdk");
 
 dotenv.config();
 
@@ -20,6 +24,29 @@ const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET;
 const FRONTEND_URL =
     process.env.FRONTEND_URL ||
     "https://aircanvas-meet.vercel.app";
+
+/*
+ * HOST CONTROLS (mute / remove participant).
+ * Used only by the two new endpoints below. Built lazily inside
+ * each endpoint (not here at startup) so a missing LiveKit config
+ * can never crash server boot — it just makes those two endpoints
+ * return a clean error instead.
+ */
+function getRoomServiceClient() {
+    if (
+        !LIVEKIT_URL ||
+        !LIVEKIT_API_KEY ||
+        !LIVEKIT_API_SECRET
+    ) {
+        return null;
+    }
+
+    return new RoomServiceClient(
+        LIVEKIT_URL,
+        LIVEKIT_API_KEY,
+        LIVEKIT_API_SECRET
+    );
+}
 
 app.use(
     cors({
@@ -248,6 +275,189 @@ app.post("/api/meeting/token", async (req, res) => {
 });
 
 // ============================================================
+// HOST: MUTE / UNMUTE A PARTICIPANT'S MIC OR CAMERA
+// ============================================================
+// Body: { roomId, hostToken, participantIdentity, trackType, muted }
+// trackType is "microphone" or "camera". muted is true/false.
+// Only the meeting host (verified the same way as every other
+// endpoint here, via the signed hostToken) can call this.
+// ============================================================
+
+app.post(
+    "/api/meeting/mute-participant",
+    async (req, res) => {
+        try {
+            const {
+                roomId,
+                hostToken,
+                participantIdentity,
+                trackType,
+                muted,
+            } = req.body;
+
+            if (
+                !roomId ||
+                !participantIdentity ||
+                !trackType
+            ) {
+                return res.status(400).json({
+                    success: false,
+                    message:
+                        "roomId, participantIdentity and trackType are required",
+                });
+            }
+
+            if (
+                !verifyHostToken(
+                    roomId,
+                    hostToken
+                )
+            ) {
+                return res.status(403).json({
+                    success: false,
+                    message:
+                        "Only the host can do that",
+                });
+            }
+
+            const roomService =
+                getRoomServiceClient();
+
+            if (!roomService) {
+                return res.status(500).json({
+                    success: false,
+                    message:
+                        "LiveKit credentials are not configured",
+                });
+            }
+
+            const participant =
+                await roomService.getParticipant(
+                    roomId,
+                    participantIdentity
+                );
+
+            const wantedSource =
+                trackType === "camera"
+                    ? TrackSource.CAMERA
+                    : TrackSource.MICROPHONE;
+
+            const track = (
+                participant.tracks || []
+            ).find(
+                (candidate) =>
+                    candidate.source ===
+                    wantedSource
+            );
+
+            if (!track) {
+                return res.status(404).json({
+                    success: false,
+                    message: `That participant has no active ${trackType} track`,
+                });
+            }
+
+            await roomService.mutePublishedTrack(
+                roomId,
+                participantIdentity,
+                track.sid,
+                muted !== false
+            );
+
+            res.json({
+                success: true,
+            });
+        } catch (error) {
+            console.error(
+                "Mute participant error:",
+                error
+            );
+
+            res.status(500).json({
+                success: false,
+                message:
+                    "Failed to mute/unmute participant",
+            });
+        }
+    }
+);
+
+// ============================================================
+// HOST: REMOVE A PARTICIPANT FROM THE MEETING
+// ============================================================
+// Body: { roomId, hostToken, participantIdentity }
+// Only the meeting host can call this.
+// ============================================================
+
+app.post(
+    "/api/meeting/remove-participant",
+    async (req, res) => {
+        try {
+            const {
+                roomId,
+                hostToken,
+                participantIdentity,
+            } = req.body;
+
+            if (
+                !roomId ||
+                !participantIdentity
+            ) {
+                return res.status(400).json({
+                    success: false,
+                    message:
+                        "roomId and participantIdentity are required",
+                });
+            }
+
+            if (
+                !verifyHostToken(
+                    roomId,
+                    hostToken
+                )
+            ) {
+                return res.status(403).json({
+                    success: false,
+                    message:
+                        "Only the host can do that",
+                });
+            }
+
+            const roomService =
+                getRoomServiceClient();
+
+            if (!roomService) {
+                return res.status(500).json({
+                    success: false,
+                    message:
+                        "LiveKit credentials are not configured",
+                });
+            }
+
+            await roomService.removeParticipant(
+                roomId,
+                participantIdentity
+            );
+
+            res.json({
+                success: true,
+            });
+        } catch (error) {
+            console.error(
+                "Remove participant error:",
+                error
+            );
+
+            res.status(500).json({
+                success: false,
+                message:
+                    "Failed to remove participant",
+            });
+        }
+    }
+);
+
+// ============================================================
 // CREATE SIGNED HOST TOKEN
 // ============================================================
 
@@ -309,6 +519,43 @@ function verifyHostToken(
         receivedBuffer
     );
 }
+
+// ============================================================
+// FIX (diagnostics): JSON SAFETY NET
+// ============================================================
+// Everything above already returns JSON on its own success/error
+// paths. These two handlers only catch what nothing above catches:
+// (a) a request to a route that doesn't exist at all (e.g. the
+// frontend calling an endpoint that hasn't been deployed to THIS
+// running server yet), which Express would otherwise answer with
+// its default HTML "Cannot POST /..." page, and (b) any truly
+// unexpected thrown/rejected error that isn't already wrapped in
+// a route's own try/catch. Both previously came back as non-JSON,
+// which is exactly what made them indistinguishable, on the
+// frontend, from a dropped network connection. Placed last, after
+// every real route above, so they never intercept a request that
+// a real route would otherwise have handled.
+// ============================================================
+
+app.use((req, res) => {
+    res.status(404).json({
+        success: false,
+        message: `No route ${req.method} ${req.path} on this backend. If you just added this endpoint, the backend likely needs to be redeployed.`,
+    });
+});
+
+app.use((error, req, res, next) => {
+    console.error(
+        "Unhandled server error:",
+        error
+    );
+
+    res.status(500).json({
+        success: false,
+        message:
+            "Unexpected server error",
+    });
+});
 
 // ============================================================
 // START SERVER

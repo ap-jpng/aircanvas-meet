@@ -1468,8 +1468,21 @@ input:focus-visible {
 ========================================================= */
 
 .reaction-picker {
-    position: absolute;
-    bottom: 62px;
+    /*
+     * FIX (mobile reactions invisible): this was position:absolute,
+     * positioned relative to its nearest positioned ancestor -- a
+     * wrapper div inside .controls-left. On mobile, .controls-left
+     * has overflow-y:hidden (needed so the button row can scroll
+     * horizontally without wrapping to a second line), which was
+     * silently clipping this popover every time it tried to open
+     * upward, even though it was rendering and its state was
+     * toggling correctly on tap. position:fixed removes it from
+     * that clipped ancestor entirely by positioning it relative to
+     * the viewport instead, so it can no longer be clipped by
+     * .controls-left on any screen size.
+     */
+    position: fixed;
+    bottom: 92px;
     left: 50%;
     transform: translateX(-50%);
     display: flex;
@@ -1479,7 +1492,13 @@ input:focus-visible {
     background: #11182a;
     border: 1px solid #263149;
     box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
-    z-index: 40;
+    /*
+     * Bumped from 40 to 55 so it also sits above the mobile side
+     * panel (z-index:50) if a panel happens to be open at the same
+     * time -- previously it could be open but still hidden behind
+     * that panel on mobile.
+     */
+    z-index: 55;
 }
 
 .reaction-picker-button {
