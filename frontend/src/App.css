@@ -574,6 +574,22 @@ body {
     object-fit: cover;
 }
 
+/*
+ * FIX: LiveKit's ParticipantTile renders its own built-in name tag
+ * (".lk-participant-metadata", showing just the bare identity, e.g.
+ * "likki") and its own focus-toggle button (".lk-focus-toggle-button")
+ * by default. We already render our own name/host/AirCanvas/mic
+ * overlay (.participant-overlay below) and our own pin/fullscreen
+ * buttons (.tile-action-buttons above), so LiveKit's versions were
+ * just showing up as a duplicate name behind ours in the bottom-left
+ * and a stray extra icon in the bottom-right. Hiding them is
+ * CSS-only and doesn't touch how tracks render.
+ */
+.custom-participant-tile .lk-participant-metadata,
+.custom-participant-tile .lk-focus-toggle-button {
+    display: none !important;
+}
+
 .participant-overlay {
     position: absolute;
     left: 10px;
